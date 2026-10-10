@@ -36,7 +36,7 @@ jobs:
           packages: 'platform-tools'
       - name: Install build tools
         run: |
-          brew install cmake meson ninja pkg-config nasm fmt googletest sdl3 ffmpeg
+          brew install cmake meson ninja pkg-config nasm fmt googletest sdl3 ffmpeg libusb brotli lz4 zstd pcre2
           mkdir -p "$RUNNER_TEMP/bin"
           curl --fail --location https://raw.githubusercontent.com/libav/gas-preprocessor/d09971fad329d32df19f5bbafe88cf2f0ed04ed7/gas-preprocessor.pl -o "$RUNNER_TEMP/bin/gas-preprocessor.pl"
           chmod +x "$RUNNER_TEMP/bin/gas-preprocessor.pl"

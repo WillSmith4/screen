@@ -27,11 +27,22 @@ p = base / 'make-protobuf.sh'
 s = p.read_text()
 start = s.index('# Hack files')
 end = s.index('cmake --build', start)
-p.write_text(s[:start] + s[end:])
+s = s[:start] + s[end:]
+s = '\n'.join(line for line in s.splitlines() if 'git checkout 20240722.0' not in line)
+p.write_text(s + '\n')
 p = base / 'make-adb.sh'
 s = p.read_text().replace('git am --abort)', 'git am --abort || true)')
+s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Release \\
+    -DANDROID_TOOLS_USE_BUNDLED_FMT=ON \\
+    -DProtobuf_INCLUDE_DIR="$SOURCE_ROOT/external/protobuf/src" \\
+    -DProtobuf_LIBRARY="$FULL_OUTPUT/libprotobuf.a" \\
+    -DProtobuf_PROTOC_EXECUTABLE="$(command -v protoc)" \\
+    -DCMAKE_CXX_FLAGS="-I$SOURCE_ROOT/external/protobuf/third_party/abseil-cpp" ..;''')
 p.write_text(s)
 PY
+# android-tools applies its platform patches with git am.
+git config --global user.name 'Scrcpy Remote CI'
+git config --global user.email 'ci@users.noreply.github.com'
 for dependency in lz4 zstd brotli protobuf adb; do
   (cd external/adb-mobile/porting && TARGET="$dependency/iphoneos/arm64" OUTPUT=../output bash -e "scripts/make-$dependency.sh")
 done
