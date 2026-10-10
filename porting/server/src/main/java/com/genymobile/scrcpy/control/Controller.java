@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class Controller implements AsyncProcessor, VirtualDisplayListener {
+    private final StylusInjector stylusInjector = new StylusInjector();
 
     /*
      * For event injection, there are two display ids:
@@ -292,6 +293,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 Ln.e("Controller error", e);
             } finally {
                 Ln.d("Controller stopped");
+                stylusInjector.cancel();
                 if (uhidManager != null) {
                     uhidManager.closeAll();
                 }
@@ -352,6 +354,17 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         if (!camera) {
             switch (type) {
+                case ControlMessage.TYPE_INJECT_STYLUS:
+                    if (supportsInputEvents) {
+                        StylusPacket packet = msg.getStylus();
+                        Pair<Point, Integer> target = getEventPointAndDisplayId(packet.position);
+                        if (target == null) {
+                            stylusInjector.cancel();
+                        } else {
+                            stylusInjector.inject(packet, target.first, target.second);
+                        }
+                    }
+                    return true;
                 case ControlMessage.TYPE_INJECT_KEYCODE:
                     if (supportsInputEvents) {
                         injectKeycode(msg.getAction(), msg.getKeycode(), msg.getRepeat(), msg.getMetaState());

@@ -20,6 +20,7 @@
 #import "ScrcpyCommon.h"
 #import "Scrcpy_Remote-Swift.h"
 #import "ScrcpyConstants.h"
+#import "ScrcpyPencilRouting.h"
 
 // External notification name from ScrcpyRuntime
 extern NSString * const ScrcpyRemoteOrientationChangedNotification;
@@ -262,6 +263,7 @@ static char orientationLockEnabledKey;
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
+    [ScrcpyPencilRouting attachToView:self.view];
 
     // Hide the home indicator (value 1) AND defer the system screen-edge
     // gestures (value 2) so a single bottom swipe is captured by scrcpy

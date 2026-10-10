@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-mkdir -p build
+mkdir -p build/tests
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 # Generate scrcpy's configuration using the host dependencies. Only the CMake
 # iOS port is compiled/linked into the app.
@@ -11,7 +11,12 @@ meson setup scrcpy/x scrcpy --buildtype=release -Dusb=false -Dcompile_server=fal
 cp porting/include/*.h porting/libs/include/
 # Build the matching server from the pinned submodule plus our additive overlays.
 cp -R porting/server/src/main/java/. scrcpy/server/src/main/java/
-(cd scrcpy && bash gradlew --no-daemon :server:assembleRelease)
+mkdir -p scrcpy/server/src/test/java
+cp -R porting/server/src/test/java/. scrcpy/server/src/test/java/
+export STYLUS_FIXTURE="$ROOT/build/tests/stylus-packet.bin"
+cc -std=c11 -Iporting/include tests/test_stylus_protocol.c -lm -o build/tests/test-stylus
+build/tests/test-stylus "$STYLUS_FIXTURE"
+(cd scrcpy && bash gradlew --no-daemon :server:testDebugUnitTest :server:assembleRelease)
 cp scrcpy/server/build/outputs/apk/release/server-release-unsigned.apk scrcpy-app/ADBClient/scrcpy-server
 xcodebuild -project 'scrcpy-app/Scrcpy Remote.xcodeproj' -scheme 'Scrcpy Remote' \
   -sdk iphoneos -destination 'generic/platform=iOS' -configuration Release \

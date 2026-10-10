@@ -167,6 +167,10 @@ sc_screen_log_geometry_if_changed(struct sc_screen *screen) {
 
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+    extern bool sc_stylus_handle_event(struct sc_screen *, const SDL_Event *);
+    if (sc_stylus_handle_event(screen, event)) {
+        return;
+    }
     // Handle Clipboard Event to Sync Clipboard to Remote
     if (event->type == SDL_EVENT_CLIPBOARD_UPDATE) {
         char *text = SDL_GetClipboardText();

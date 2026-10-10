@@ -31,6 +31,7 @@ struct SessionCreateView: View {
     @State private var enableVNCaudio: Bool = false
     @State private var enableADBaudio: Bool = false
     @State private var startNewDisplay: Bool = false
+    @State private var drawingToolkit = DrawingToolkitOptions()
     private let isEditMode: Bool
     
     // Check if ADB is auto-selected based on input (not forced by user)
@@ -79,6 +80,7 @@ struct SessionCreateView: View {
         _enableVNCaudio = State(initialValue: sessionModel.vncOptions.enableAudio)
         _enableADBaudio = State(initialValue: sessionModel.adbOptions.enableAudio)
         _startNewDisplay = State(initialValue: sessionModel.adbOptions.startNewDisplay)
+        _drawingToolkit = State(initialValue: sessionModel.adbOptions.drawingToolkit)
         isEditMode = true
     }
     
@@ -350,6 +352,13 @@ struct SessionCreateView: View {
                     }
                 }
                 
+                if effectiveDeviceType == .adb {
+                    DrawingToolkitSection(options: $drawingToolkit)
+                        .onChange(of: drawingToolkit) { newValue in
+                            sessionModel.adbOptions.drawingToolkit = newValue
+                        }
+                }
+
                 Section {
                     Button(action: {
                         // Validate session before saving (using current input values)
@@ -391,6 +400,7 @@ struct SessionCreateView: View {
                 enableVNCaudio = sessionModel.vncOptions.enableAudio
                 enableADBaudio = sessionModel.adbOptions.enableAudio
                 startNewDisplay = sessionModel.adbOptions.startNewDisplay
+                drawingToolkit = sessionModel.adbOptions.drawingToolkit
             }
             .onChange(of: hostInput) { newValue in
                 // If user types explicit scheme, ignore any previous force toggle

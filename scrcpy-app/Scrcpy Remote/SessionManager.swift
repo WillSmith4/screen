@@ -122,6 +122,7 @@ enum ADBAudioCodec: String, Codable, CaseIterable {
 // ADB Session Model can be saved to AppStorage
 struct ADBSessionOptions: Codable, Identifiable {
     var id = UUID()
+    var drawingToolkit = DrawingToolkitOptions()
     var maxScreenSize: String = ""
     var bitRate: String = ""
     var videoCodec: ADBVideoCodec = .h264
@@ -176,6 +177,7 @@ struct ADBSessionOptions: Codable, Identifiable {
         
         // Decode with default values for backward compatibility
         self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.drawingToolkit = (try? container.decodeIfPresent(DrawingToolkitOptions.self, forKey: .drawingToolkit)) ?? DrawingToolkitOptions()
         self.maxScreenSize = try container.decodeIfPresent(String.self, forKey: .maxScreenSize) ?? ""
         self.bitRate = try container.decodeIfPresent(String.self, forKey: .bitRate) ?? ""
         self.videoEncoder = try container.decodeIfPresent(String.self, forKey: .videoEncoder) ?? ""

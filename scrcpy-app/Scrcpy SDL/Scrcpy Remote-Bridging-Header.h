@@ -3,6 +3,7 @@
 //
 
 #import <SDL3/SDL.h>
+#import "scrcpy-stylus.h"
 // Intentionally do NOT import <SDL3/SDL_main.h>: in SDL3 that header
 // generates an inline `int main(int, char**)` that calls SDL_RunApp +
 // SDL_main, which conflicts with our SwiftUI host (the iOS app drives SDL

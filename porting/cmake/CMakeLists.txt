@@ -8,7 +8,8 @@ add_library( # Sets the name of the library.
         # Sets the library as a shared library.
         STATIC
         # Sources of scrcpy v4.0
-        ../../scrcpy/app/src/control_msg.c
+        ../src/control_msg-porting.c
+        ../src/stylus-porting.c
         # display.c was removed in v4.0 (folded into screen.c + texture.c);
         # the porting equivalents now live in screen-porting.c / texture-porting.c.
         ../../scrcpy/app/src/disconnect.c

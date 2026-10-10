@@ -7,7 +7,7 @@ permissions:
   contents: read
 concurrency:
   group: ipa-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: macos-15
@@ -69,4 +69,5 @@ jobs:
             build-dependencies.log
             build/xcodebuild.log
             build/Archive.xcresult
+            scrcpy/server/build/reports/tests
           if-no-files-found: ignore
