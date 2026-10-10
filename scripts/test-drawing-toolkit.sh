@@ -9,3 +9,7 @@ build/tests/test-drawing
 xcrun swiftc -typecheck -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
   -target arm64-apple-ios15.0-simulator \
   'scrcpy-app/Scrcpy Remote/DrawingToolkitOptions.swift' 'scrcpy-app/Scrcpy Remote/DrawingToolkitView.swift'
+xcrun swiftc -typecheck -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+  -target arm64-apple-ios15.0-simulator \
+  'scrcpy-app/Scrcpy Remote/DrawingToolkitOptions.swift' \
+  'scrcpy-app/Scrcpy Remote/DrawingInputHandler.swift' tests/DrawingInputCompileSupport.swift
