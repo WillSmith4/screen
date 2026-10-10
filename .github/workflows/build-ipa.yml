@@ -46,7 +46,8 @@ jobs:
         id: native
         with:
           path: porting/libs
-          key: ios-arm64-xcode26-v2-${{ hashFiles('scripts/ci-build-dependencies.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
+          key: ios-arm64-xcode26-v2-${{ hashFiles('scripts/ci-build-dependencies.sh', 'scripts/ci-build-vnc.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
+          restore-keys: ios-arm64-xcode26-v2-
       - name: Build native dependencies
         if: steps.native.outputs.cache-hit != 'true'
         run: bash scripts/ci-build-dependencies.sh 2>&1 | tee build-dependencies.log

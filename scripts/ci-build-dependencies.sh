@@ -6,6 +6,14 @@ cd "$ROOT"
 mkdir -p build porting/libs/iphoneos/arm64 porting/libs/include
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
+# Reuse compatible device libraries when the workflow restores an older cache.
+# VNC is configured again below so host package discovery cannot leak into it.
+rebuild=false
+for library in adb-full SDL3 avcodec avformat avutil swresample swscale ssl crypto; do
+  test -s "porting/libs/iphoneos/arm64/lib$library.a" || rebuild=true
+done
+if [ "$rebuild" = true ]; then
+
 # adb-mobile needs the same protoc version as its vendored protobuf sources.
 mkdir -p build/protoc
 curl --fail --location --retry 3 https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-osx-universal_binary.zip -o build/protoc.zip
@@ -58,14 +66,17 @@ cd "$ROOT/external/OpenSSL-for-iPhone"
 ./build-libssl.sh --disable-bitcode --targets="ios-cross-arm64"
 cp bin/iPhoneOS*-arm64.sdk/lib/*.a "$ROOT/porting/libs/iphoneos/arm64/"
 cp -R include/openssl "$ROOT/porting/libs/include/"
+fi
 
 cd "$ROOT/porting"
-target=iphoneos/arm64:OS64 output_dir=./libs bash scripts/make-vncclient.sh
+bash "$ROOT/scripts/ci-build-vnc.sh"
+if [ ! -s libs/iphoneos/arm64/libtsnet-forwarder.a ]; then
 (cd libtsnet && go mod tidy)
 make -C libtsnet build-iphoneos-arm64
 cp libtsnet/build/iphoneos/arm64/libtsnet-forwarder.a libs/iphoneos/arm64/
 cp libtsnet/lib/tsnet_forwarder.h libs/include/
 cp libtsnet/build/include/libtsnet-forwarder.h libs/include/
+fi
 test -s libs/iphoneos/arm64/libadb-full.a
 test -s libs/iphoneos/arm64/libSDL3.a
 test -s libs/iphoneos/arm64/libavcodec.a
