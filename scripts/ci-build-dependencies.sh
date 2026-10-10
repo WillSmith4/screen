@@ -63,13 +63,12 @@ OUTPUT=libs bash -e -c "$(sed '/^build_target SIMULATOR/d; /^ls -la/,$d' scripts
 OUTPUT=libs bash -e -c "$(sed '/^build_target "iphonesimulator/d' scripts/make-ffmpeg.sh)" scripts/make-ffmpeg.sh
 
 cd "$ROOT/external/OpenSSL-for-iPhone"
-./build-libssl.sh --disable-bitcode --targets="ios-cross-arm64"
+./build-libssl.sh --disable-bitcode --deprecated --targets="ios-cross-arm64"
 cp bin/iPhoneOS*-arm64.sdk/lib/*.a "$ROOT/porting/libs/iphoneos/arm64/"
 cp -R include/openssl "$ROOT/porting/libs/include/"
 fi
 
 cd "$ROOT/porting"
-bash "$ROOT/scripts/ci-build-vnc.sh"
 if [ ! -s libs/iphoneos/arm64/libtsnet-forwarder.a ]; then
 (cd libtsnet && go mod tidy)
 make -C libtsnet build-iphoneos-arm64
@@ -80,6 +79,5 @@ fi
 test -s libs/iphoneos/arm64/libadb-full.a
 test -s libs/iphoneos/arm64/libSDL3.a
 test -s libs/iphoneos/arm64/libavcodec.a
-test -s libs/iphoneos/arm64/libvncclient.a
 test -s libs/iphoneos/arm64/libtsnet-forwarder.a
 test -s libs/include/SDL3/SDL.h

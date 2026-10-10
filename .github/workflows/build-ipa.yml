@@ -46,8 +46,7 @@ jobs:
         id: native
         with:
           path: porting/libs
-          key: ios-arm64-xcode26-v2-${{ hashFiles('scripts/ci-build-dependencies.sh', 'scripts/ci-build-vnc.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
-          restore-keys: ios-arm64-xcode26-v2-
+          key: ios-arm64-xcode26-v3-${{ hashFiles('scripts/ci-build-dependencies.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
       - name: Build native dependencies
         if: steps.native.outputs.cache-hit != 'true'
         run: bash scripts/ci-build-dependencies.sh 2>&1 | tee build-dependencies.log
@@ -57,6 +56,8 @@ jobs:
         with:
           path: porting/libs
           key: ${{ steps.native.outputs.cache-primary-key }}
+      - name: Build VNC with device OpenSSL
+        run: bash scripts/ci-build-vnc.sh 2>&1 | tee build-vnc.log
       - name: Build application and matching Android server
         run: bash scripts/ci-build-ipa.sh
       - uses: actions/upload-artifact@v4
@@ -71,6 +72,7 @@ jobs:
           name: build-diagnostics
           path: |
             build-dependencies.log
+            build-vnc.log
             build/xcodebuild.log
             build/Archive.xcresult
             scrcpy/server/build/reports/tests
