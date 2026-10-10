@@ -37,7 +37,7 @@ s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Release \\
     -DProtobuf_INCLUDE_DIR="$SOURCE_ROOT/external/protobuf/src" \\
     -DProtobuf_LIBRARY="$FULL_OUTPUT/libprotobuf.a" \\
     -DProtobuf_PROTOC_EXECUTABLE="$(command -v protoc)" \\
-    -DCMAKE_CXX_FLAGS="-I$SOURCE_ROOT/external/protobuf/third_party/abseil-cpp" ..;''')
+    -DCMAKE_CXX_FLAGS="-I$SOURCE_ROOT/external/protobuf/third_party/abseil-cpp -I$SOURCE_ROOT/external/protobuf/third_party/googletest/googletest/include -I$SOURCE_ROOT/external/lz4/lib -I$SOURCE_ROOT/external/brotli/c/include -I$SOURCE_ROOT/external/zstd/lib" ..;''')
 p.write_text(s)
 PY
 # android-tools applies its platform patches with git am.

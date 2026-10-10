@@ -17,8 +17,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Fetch application dependencies
+        run: git submodule update --init --recursive --depth 1 scrcpy ios-cmake external/adb-mobile external/libvncserver external/OpenSSL-for-iPhone
       - name: Select Xcode
         run: |
           sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
