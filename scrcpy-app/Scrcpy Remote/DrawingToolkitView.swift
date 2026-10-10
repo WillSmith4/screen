@@ -119,7 +119,7 @@ struct DrawingPressureView: View {
         Form {
             Section {
                 Toggle("Enable Pressure Curve", isOn: $options.pressureCurveEnabled)
-                DrawingCurveGraph(points: $options.curve)
+                DrawingCurveGraph(points: $options.curve, beginEditing: { previousCurve = options.curve })
                     .frame(height: 240).padding(.vertical, 8)
                 Text("Drag the points to change output pressure. The horizontal axis is Pencil pressure; the vertical axis is pressure sent to Android.")
                     .font(.caption).foregroundColor(.secondary)
@@ -178,42 +178,60 @@ struct DrawingPressureView: View {
 
 private struct DrawingCurveGraph: View {
     @Binding var points: [DrawingPressurePoint]
+    var beginEditing: () -> Void
+    @State private var dragging = false
     var body: some View {
         GeometryReader { proxy in
-            let size = proxy.size
             ZStack {
                 RoundedRectangle(cornerRadius: 8).fill(Color(UIColor.secondarySystemGroupedBackground))
-                Path { p in
-                    for i in 0...4 {
-                        let t = CGFloat(i) / 4
-                        p.move(to: CGPoint(x: t * size.width, y: 0)); p.addLine(to: CGPoint(x: t * size.width, y: size.height))
-                        p.move(to: CGPoint(x: 0, y: t * size.height)); p.addLine(to: CGPoint(x: size.width, y: t * size.height))
-                    }
-                }.stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                Path { p in
-                    for i in 0...100 {
-                        let x = Double(i) / 100
-                        let point = CGPoint(x: x * size.width, y: (1 - DrawingPressureCurve.value(x, points: points)) * size.height)
-                        if i == 0 { p.move(to: point) } else { p.addLine(to: point) }
-                    }
-                }.stroke(Color.accentColor, lineWidth: 2)
+                grid(size: proxy.size).stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                curve(size: proxy.size).stroke(Color.accentColor, lineWidth: 2)
                 ForEach(points.indices, id: \.self) { i in
-                    Circle().fill(Color.accentColor).frame(width: 18, height: 18)
-                        .position(x: points[i].x * size.width, y: (1 - points[i].y) * size.height)
-                        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("pressureGraph")).onChanged { value in
-                            points[i].y = DrawingPressureCurve.clamp(1 - value.location.y / size.height)
-                            if i > 0 && i < points.count - 1 {
-                                points[i].x = min(max(value.location.x / size.width, points[i - 1].x + 0.01), points[i + 1].x - 0.01)
-                            }
-                        })
-                        .accessibilityLabel("Pressure point \(i + 1)")
-                        .accessibilityValue("\(Int(points[i].y * 100)) percent")
-                        .accessibilityAdjustableAction { direction in
-                            points[i].y = DrawingPressureCurve.clamp(points[i].y + (direction == .increment ? 0.05 : -0.05))
-                        }
+                    handle(i, size: proxy.size)
                 }
             }.coordinateSpace(name: "pressureGraph")
         }
+    }
+    private func grid(size: CGSize) -> Path {
+        Path { path in
+            for i in 0...4 {
+                let t = CGFloat(i) / 4
+                path.move(to: CGPoint(x: t * size.width, y: 0))
+                path.addLine(to: CGPoint(x: t * size.width, y: size.height))
+                path.move(to: CGPoint(x: 0, y: t * size.height))
+                path.addLine(to: CGPoint(x: size.width, y: t * size.height))
+            }
+        }
+    }
+    private func curve(size: CGSize) -> Path {
+        Path { path in
+            for i in 0...100 {
+                let x = Double(i) / 100
+                let y = DrawingPressureCurve.value(x, points: points)
+                let point = CGPoint(x: CGFloat(x) * size.width, y: CGFloat(1 - y) * size.height)
+                if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+        }
+    }
+    private func handle(_ i: Int, size: CGSize) -> some View {
+        Circle().fill(Color.accentColor).frame(width: 18, height: 18)
+            .frame(width: 44, height: 44).contentShape(Rectangle())
+            .position(x: CGFloat(points[i].x) * size.width, y: CGFloat(1 - points[i].y) * size.height)
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("pressureGraph"))
+                .onChanged { value in
+                    if !dragging { beginEditing(); dragging = true }
+                    points[i].y = DrawingPressureCurve.clamp(1 - Double(value.location.y / size.height))
+                    if i > 0 && i < points.count - 1 {
+                        let x = Double(value.location.x / size.width)
+                        points[i].x = min(max(x, points[i - 1].x + 0.01), points[i + 1].x - 0.01)
+                    }
+                }.onEnded { _ in dragging = false })
+            .accessibilityLabel("Pressure point \(i + 1)")
+            .accessibilityValue("\(Int(points[i].y * 100)) percent")
+            .accessibilityAdjustableAction { direction in
+                beginEditing()
+                points[i].y = DrawingPressureCurve.clamp(points[i].y + (direction == .increment ? 0.05 : -0.05))
+            }
     }
 }
 

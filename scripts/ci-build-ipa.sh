@@ -7,7 +7,8 @@ export CMAKE_POLICY_VERSION_MINIMUM=3.5
 # Generate scrcpy's configuration using the host dependencies. Only the CMake
 # iOS port is compiled/linked into the app.
 meson setup scrcpy/x scrcpy --buildtype=release -Dusb=false -Dcompile_server=false
-(cd porting && target=iphoneos/arm64:OS64 output_dir=./libs bash scripts/make-scrcpy.sh)
+(cd porting && target=iphoneos/arm64:OS64 output_dir=./libs bash -e scripts/make-scrcpy.sh)
+test -s porting/libs/iphoneos/arm64/libscrcpy.a
 cp porting/include/*.h porting/libs/include/
 # Build the matching server from the pinned submodule plus our additive overlays.
 cp -R porting/server/src/main/java/. scrcpy/server/src/main/java/

@@ -12,6 +12,9 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,7 +46,7 @@ jobs:
         id: native
         with:
           path: porting/libs
-          key: ios-arm64-xcode26-v1-${{ hashFiles('scripts/ci-build-dependencies.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
+          key: ios-arm64-xcode26-v2-${{ hashFiles('scripts/ci-build-dependencies.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
       - name: Build native dependencies
         if: steps.native.outputs.cache-hit != 'true'
         run: bash scripts/ci-build-dependencies.sh 2>&1 | tee build-dependencies.log

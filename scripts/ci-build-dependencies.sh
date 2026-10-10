@@ -12,13 +12,35 @@ curl --fail --location --retry 3 https://github.com/protocolbuffers/protobuf/rel
 unzip -oq build/protoc.zip -d build/protoc
 export PATH="$ROOT/build/protoc/bin:$PATH"
 mkdir -p external/adb-mobile/output
-make -C external/adb-mobile/porting lz4/iphoneos/arm64 zstd/iphoneos/arm64 brotli/iphoneos/arm64 protobuf/iphoneos/arm64 adb/iphoneos/arm64
+# The dependency's old build helpers need small clean-runner adaptations. Keep
+# these confined to CI's submodule checkout, not the application's source.
+git -C external/adb-mobile/external/protobuf fetch --depth 1 origin tag v28.3
+python3 - <<'PY'
+from pathlib import Path
+base = Path('external/adb-mobile/porting/scripts')
+p = base / 'make-zstd.sh'
+s = p.read_text()
+s = '\n'.join(line for line in s.splitlines() if 'CMakeLists.zstd.txt' not in line)
+s = s.replace('-DDEPLOYMENT_TARGET=$DEPLOYMENT_TARGET;', '-DDEPLOYMENT_TARGET=$DEPLOYMENT_TARGET -DZSTD_BUILD_PROGRAMS=OFF;')
+p.write_text(s + '\n')
+p = base / 'make-protobuf.sh'
+s = p.read_text()
+start = s.index('# Hack files')
+end = s.index('cmake --build', start)
+p.write_text(s[:start] + s[end:])
+p = base / 'make-adb.sh'
+s = p.read_text().replace('git am --abort)', 'git am --abort || true)')
+p.write_text(s)
+PY
+for dependency in lz4 zstd brotli protobuf adb; do
+  (cd external/adb-mobile/porting && TARGET="$dependency/iphoneos/arm64" OUTPUT=../output bash -e "scripts/make-$dependency.sh")
+done
 libtool -static -o porting/libs/iphoneos/arm64/libadb-full.a external/adb-mobile/output/iphoneos/arm64/*.a
 cp external/adb-mobile/porting/adb/include/adb_public.h porting/libs/include/
 
 # Keep the original local build scripts unchanged; omit simulator passes for IPA CI.
 cd "$ROOT/porting"
-OUTPUT=libs bash -e -c "$(sed '/^build_target SIMULATOR/d' scripts/make-libsdl.sh)" scripts/make-libsdl.sh
+OUTPUT=libs bash -e -c "$(sed '/^build_target SIMULATOR/d; /^ls -la/,$d' scripts/make-libsdl.sh)" scripts/make-libsdl.sh
 OUTPUT=libs bash -e -c "$(sed '/^build_target "iphonesimulator/d' scripts/make-ffmpeg.sh)" scripts/make-ffmpeg.sh
 
 cd "$ROOT/external/OpenSSL-for-iPhone"
@@ -38,3 +60,4 @@ test -s libs/iphoneos/arm64/libSDL3.a
 test -s libs/iphoneos/arm64/libavcodec.a
 test -s libs/iphoneos/arm64/libvncclient.a
 test -s libs/iphoneos/arm64/libtsnet-forwarder.a
+test -s libs/include/SDL3/SDL.h
