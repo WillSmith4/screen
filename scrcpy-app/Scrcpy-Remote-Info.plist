@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>DEBUG builds expose a local HTTP log server on port 4321 for live debugging from a host machine. Release builds do not.</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.scrcpy.remote.background-refresh</string>
+		<string>com.scrcpy.remote.background-processing</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Scrcpy Remote V2 URL Scheme</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>scrcpy2</string>
+			</array>
+		</dict>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>processing</string>
+		<string>fetch</string>
+		<string>audio</string>
+	</array>
+	<key>UIDeviceFamily</key>
+	<array>
+		<string>1</string>
+		<string>2</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UILaunchScreen</key>
+		<dict>
+			<key>UILaunchStoryboardName</key>
+			<string>Launch Screen</string>
+		</dict>
+	</dict>
+</dict>
+</plist>
