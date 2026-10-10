@@ -293,7 +293,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 Ln.e("Controller error", e);
             } finally {
                 Ln.d("Controller stopped");
-                stylusInjector.cancel();
+                try {
+                    stylusInjector.cancel();
+                } catch (RuntimeException e) {
+                    Ln.w("Could not cancel final stylus event", e);
+                }
                 if (uhidManager != null) {
                     uhidManager.closeAll();
                 }
@@ -356,13 +360,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             switch (type) {
                 case ControlMessage.TYPE_INJECT_STYLUS:
                     if (supportsInputEvents) {
-                        StylusPacket packet = msg.getStylus();
-                        Pair<Point, Integer> target = getEventPointAndDisplayId(packet.position);
-                        if (target == null) {
-                            stylusInjector.cancel();
-                        } else {
-                            stylusInjector.inject(packet, target.first, target.second);
-                        }
+                        injectStylus(msg.getStylus());
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_KEYCODE:
@@ -496,6 +494,19 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             successCount++;
         }
         return successCount;
+    }
+
+    private void injectStylus(StylusPacket packet) {
+        // Keep coordinates and axes on one atomic display mapping snapshot.
+        DisplayData data = displayData.get();
+        Point point = data == null ? packet.position.getPoint() : data.positionMapper.map(packet.position);
+        int target = data == null ? displayId : data.virtualDisplayId;
+        if (point == null || target == Device.DISPLAY_ID_NONE) {
+            stylusInjector.cancel();
+            return;
+        }
+        float orientation = data == null ? packet.orientation : packet.mappedOrientation(data.positionMapper);
+        stylusInjector.inject(packet, point, target, orientation);
     }
 
     private Pair<Point, Integer> getEventPointAndDisplayId(Position position) {

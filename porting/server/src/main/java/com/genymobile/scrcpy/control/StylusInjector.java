@@ -33,7 +33,7 @@ final class StylusInjector {
         buttons = 0;
     }
 
-    public boolean inject(StylusPacket packet, Point point, int targetDisplayId) {
+    public boolean inject(StylusPacket packet, Point point, int targetDisplayId, float orientation) {
         int action = packet.action;
         long now = SystemClock.uptimeMillis();
         if ((down || hovering) && (targetDisplayId != displayId || packet.tool != properties[0].toolType)) { cancel(); }
@@ -58,7 +58,7 @@ final class StylusInjector {
         coords[0].pressure = down && action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL ? packet.pressure : 0;
         coords[0].size = 0.01f;
         coords[0].setAxisValue(MotionEvent.AXIS_TILT, packet.tilt);
-        coords[0].setAxisValue(MotionEvent.AXIS_ORIENTATION, packet.orientation);
+        coords[0].setAxisValue(MotionEvent.AXIS_ORIENTATION, orientation);
         long time = down ? Math.min(now, serverStart + Math.max(0, (packet.timestampUs - clientStartUs) / 1000)) : now;
         time = Math.max(lastEventTime, time);
         lastEventTime = time;

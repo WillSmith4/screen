@@ -74,7 +74,13 @@ import UIKit
         gestureTypes = []
     }
 
-    @objc private func disconnect() { cancelInput(); valid = false }
+    @objc private func disconnect() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.disconnect() }
+            return
+        }
+        invalidate()
+    }
     @objc private func statusChanged(_ note: Notification) {
         if let status = note.userInfo?["status"] as? Int, status == 0 || status == 5 { disconnect() }
     }
@@ -184,6 +190,10 @@ import UIKit
         if hovering { emit(action: 10, tool: tool, timestamp: ProcessInfo.processInfo.systemUptime); hovering = false }
     }
     @objc private func cancelInput() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.cancelInput() }
+            return
+        }
         if pencil != nil {
             emit(action: 3, tool: strokeTool, timestamp: ProcessInfo.processInfo.systemUptime)
             pencil = nil

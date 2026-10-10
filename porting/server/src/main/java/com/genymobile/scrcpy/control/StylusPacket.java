@@ -1,6 +1,7 @@
 package com.genymobile.scrcpy.control;
 
 import com.genymobile.scrcpy.model.Position;
+import com.genymobile.scrcpy.model.Point;
 import java.io.DataInputStream;
 import java.io.IOException;
 
@@ -49,5 +50,18 @@ public final class StylusPacket {
         }
         return new StylusPacket(action, tool, new Position(x, y, width, height), pressure, tilt,
                 Math.max(-(float) Math.PI, orientation), buttons & (1 | 2 | 32 | 64), timestampUs);
+    }
+
+    // Apply server-side crop/rotation/reflection to the axis as well as the tip.
+    // Sampling a long direction vector keeps pixel rounding insignificant.
+    public float mappedOrientation(PositionMapper mapper) {
+        Point point = position.getPoint();
+        Position direction = new Position(point.getX() + (int) Math.round(Math.sin(orientation) * 1024),
+                point.getY() - (int) Math.round(Math.cos(orientation) * 1024),
+                position.getScreenSize().getWidth(), position.getScreenSize().getHeight());
+        Point start = mapper.map(position);
+        Point end = mapper.map(direction);
+        if (start == null || end == null) { return orientation; }
+        return (float) Math.atan2(end.getX() - start.getX(), start.getY() - end.getY());
     }
 }

@@ -6,6 +6,37 @@ on:
 permissions:
   contents: read
 jobs:
+  android-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: git submodule update --init --depth 1 scrcpy
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Test matching Android server
+        run: |
+          mkdir -p build/tests scrcpy/server/src/test/java
+          cc -std=c11 -Wall -Wextra -Werror -Iporting/include tests/test_stylus_protocol.c -lm -o build/tests/test-stylus
+          build/tests/test-stylus build/tests/stylus-packet.bin
+          cp -R porting/server/src/main/java/. scrcpy/server/src/main/java/
+          cp -R porting/server/src/test/java/. scrcpy/server/src/test/java/
+          export STYLUS_FIXTURE="$PWD/build/tests/stylus-packet.bin"
+          cd scrcpy
+          bash gradlew --no-daemon :server:testDebugUnitTest :server:assembleRelease
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Drawing-Android-Server
+          path: |
+            scrcpy/server/build/outputs/apk/release/server-release-unsigned.apk
+            scrcpy/server/build/reports/tests
   drawing-tests:
     runs-on: macos-15
     timeout-minutes: 20

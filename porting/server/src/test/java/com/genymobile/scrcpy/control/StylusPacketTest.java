@@ -1,6 +1,8 @@
 package com.genymobile.scrcpy.control;
 
 import org.junit.Test;
+import com.genymobile.scrcpy.model.Size;
+import com.genymobile.scrcpy.util.AffineMatrix;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -39,6 +41,16 @@ public class StylusPacketTest {
     @Test(expected = ControlProtocolException.class) public void rejectsUnknownVersion() throws Exception {
         byte[] data = fixture(); data[1] = 2;
         new ControlMessageReader(new ByteArrayInputStream(data)).read();
+    }
+    @Test public void mapsPenDirectionThroughServerRotationAndReflection() throws Exception {
+        StylusPacket packet = new ControlMessageReader(new ByteArrayInputStream(fixture())).read().getStylus();
+        Size size = packet.position.getScreenSize();
+        PositionMapper identity = new PositionMapper(size, null);
+        assertEquals(-Math.PI / 2, packet.mappedOrientation(identity), 0.002);
+        PositionMapper mirrored = new PositionMapper(size, new AffineMatrix(-1, 0, 0, 1, 2160, 0));
+        assertEquals(Math.PI / 2, packet.mappedOrientation(mirrored), 0.002);
+        PositionMapper rotated = new PositionMapper(size, new AffineMatrix(0, 1, -1, 0, 3840, 0));
+        assertEquals(0, packet.mappedOrientation(rotated), 0.002);
     }
     @Test(expected = ControlProtocolException.class) public void rejectsInvalidTool() throws Exception {
         byte[] data = fixture(); data[3] = 99;
