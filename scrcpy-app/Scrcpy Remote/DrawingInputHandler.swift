@@ -23,6 +23,7 @@ import UIKit
     private var hoverRecognizer: UIHoverGestureRecognizer?
     private var pencilInteraction: UIPencilInteraction?
     private var gestureTypes: [(UIGestureRecognizer, [NSNumber])] = []
+    private var disabledRecognizers: [(UIGestureRecognizer, Bool)] = []
     private var valid = true
 
     @objc init(view: UIView) {
@@ -35,15 +36,22 @@ import UIKit
         eraser = options.eraser
         lut = DrawingPressureCurve.lookup(options.curve)
         if let window = SDL_GetKeyboardFocus() ?? SDL_GetMouseFocus() { windowID = SDL_GetWindowID(window) }
-        if options.disablePencilSlide {
-            var current: UIView? = view
-            while let node = current {
-                for recognizer in node.gestureRecognizers ?? [] {
+        var current: UIView? = view
+        while let node = current {
+            for recognizer in node.gestureRecognizers ?? [] {
+                let types = recognizer.allowedTouchTypes
+                // SDL 3 has its own Pencil hover recognizer. Its synthetic
+                // mouse input must not run alongside our native stylus stream.
+                if node === view, recognizer is UIHoverGestureRecognizer,
+                   types.contains(where: { $0.intValue == UITouch.TouchType.pencil.rawValue }) {
+                    disabledRecognizers.append((recognizer, recognizer.isEnabled))
+                    recognizer.isEnabled = false
+                } else if options.disablePencilSlide {
                     gestureTypes.append((recognizer, recognizer.allowedTouchTypes))
-                    recognizer.allowedTouchTypes = recognizer.allowedTouchTypes.filter { $0.intValue != UITouch.TouchType.pencil.rawValue }
+                    recognizer.allowedTouchTypes = types.filter { $0.intValue != UITouch.TouchType.pencil.rawValue }
                 }
-                current = node.superview
             }
+            current = node.superview
         }
         let interaction = UIPencilInteraction()
         interaction.delegate = self
@@ -71,7 +79,9 @@ import UIKit
         if let hover = hoverRecognizer { view?.removeGestureRecognizer(hover) }
         if let interaction = pencilInteraction { view?.removeInteraction(interaction) }
         for (recognizer, types) in gestureTypes { recognizer.allowedTouchTypes = types }
+        for (recognizer, enabled) in disabledRecognizers { recognizer.isEnabled = enabled }
         gestureTypes = []
+        disabledRecognizers = []
     }
 
     @objc private func disconnect() {
@@ -228,6 +238,7 @@ import UIKit
     }
     private func sendShortcut(_ shortcut: DrawingShortcut, down: Bool? = nil) {
         guard let code = shortcut.keycode else { return }
+        if windowID == 0, let window = SDL_GetKeyboardFocus() ?? SDL_GetMouseFocus() { windowID = SDL_GetWindowID(window) }
         if down != false { _ = ScrcpySendDrawingKey(windowID, code, shortcut.modifiers, true) }
         if down != true { _ = ScrcpySendDrawingKey(windowID, code, shortcut.modifiers, false) }
     }
