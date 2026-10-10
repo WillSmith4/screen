@@ -28,6 +28,7 @@ cp -R include/openssl "$ROOT/porting/libs/include/"
 
 cd "$ROOT/porting"
 target=iphoneos/arm64:OS64 output_dir=./libs bash scripts/make-vncclient.sh
+(cd libtsnet && go mod tidy)
 make -C libtsnet build-iphoneos-arm64
 cp libtsnet/build/iphoneos/arm64/libtsnet-forwarder.a libs/iphoneos/arm64/
 cp libtsnet/lib/tsnet_forwarder.h libs/include/
