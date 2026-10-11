@@ -50,6 +50,16 @@ s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Debug \\
     -DProtobuf_PROTOC_EXECUTABLE="$(command -v protoc)" \\
     -DCMAKE_CXX_FLAGS="-I$SOURCE_ROOT/external/protobuf/third_party/abseil-cpp -I$SOURCE_ROOT/external/protobuf/third_party/googletest/googletest/include -I$SOURCE_ROOT/external/lz4/lib -I$SOURCE_ROOT/external/brotli/c/include -I$SOURCE_ROOT/external/zstd/lib" ..;''')
 p.write_text(s)
+# Xcode 26.6 crashes while generating the destructor of the temporary returned
+# by this reference-returning function. Return its existing empty optional;
+# adb_get_feature_set owns that object in static storage. Apply only in CI.
+p = Path('external/adb-mobile/porting/adb/client/commandline.cpp')
+s = p.read_text()
+start = s.index('const std::optional<FeatureSet>& adb_get_feature_set_or_die(')
+end = s.index('\n}', start)
+body = s[start:end]
+assert body.count('return std::nullopt;') == 1, 'ADB compatibility patch site changed'
+p.write_text(s[:start] + body.replace('return std::nullopt;', 'return features;') + s[end:])
 PY
 # android-tools applies its platform patches with git am.
 git config --global user.name 'Scrcpy Remote CI'
