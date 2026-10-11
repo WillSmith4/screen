@@ -24,14 +24,18 @@ jobs:
           script = next(root.glob('commandline-*.sh'))
           command = shlex.split(script.read_text().splitlines()[-1])
           results = []
-          for variant in ('standalone', 'limited', 'line-tables-only', 'none', 'retain-ast'):
+          for variant in ('O1', 'O2', 'O3', 'no-elide', 'no-exceptions', 'gnu++23', 'vendor-revert-off'):
               args = list(command)
-              if variant in ('limited', 'line-tables-only', 'none'):
-                  args = [a for a in args if not a.startswith('-debug-info-kind=')]
-                  if variant != 'none':
-                      args.append('-debug-info-kind=' + variant)
-              if variant == 'retain-ast':
-                  args.remove('-clear-ast-before-backend')
+              if variant.startswith('O'):
+                  args.append('-' + variant)
+              if variant == 'no-elide':
+                  args.append('-fno-elide-constructors')
+              if variant == 'no-exceptions':
+                  args = [a for a in args if a not in ('-fcxx-exceptions', '-fexceptions')]
+              if variant == 'gnu++23':
+                  args = [a.replace('-std=gnu++20', '-std=gnu++23') for a in args]
+              if variant == 'vendor-revert-off':
+                  args = [a.replace('-clang-vendor-feature=+revert09abecef7bbf', '-clang-vendor-feature=-revert09abecef7bbf') for a in args]
               args += ['-o', str(root / (variant + '.o'))]
               result = subprocess.run(args, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
               (root / (variant + '.log')).write_text(result.stdout)
