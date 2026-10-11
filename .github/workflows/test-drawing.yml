@@ -38,12 +38,12 @@ jobs:
             scrcpy/server/build/outputs/apk/release/server-release-unsigned.apk
             scrcpy/server/build/reports/tests
   drawing-tests:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
       - name: Test drawing settings and protocol
         run: bash scripts/test-drawing-toolkit.sh
       - name: Capture production drawing views in iPad simulator

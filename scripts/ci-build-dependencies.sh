@@ -14,7 +14,8 @@ for library in adb-full SDL3 avcodec avformat avutil swresample swscale ssl cryp
 done
 if [ "$rebuild" = true ]; then
 
-# adb-mobile needs the same protoc version as its vendored protobuf sources.
+# Keep the pinned protobuf sources and the Abseil version selected by the
+# author's make-protobuf.sh. Do not silently substitute vendored Abseil.
 mkdir -p build/protoc
 curl --fail --location --retry 3 https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-osx-universal_binary.zip -o build/protoc.zip
 unzip -oq build/protoc.zip -d build/protoc
@@ -23,6 +24,7 @@ mkdir -p external/adb-mobile/output
 # The dependency's old build helpers need small clean-runner adaptations. Keep
 # these confined to CI's submodule checkout, not the application's source.
 git -C external/adb-mobile/external/protobuf fetch --depth 1 origin tag v28.3
+git -C external/adb-mobile/external/protobuf/third_party/abseil-cpp fetch --depth 1 origin tag 20240722.0
 python3 - <<'PY'
 from pathlib import Path
 base = Path('external/adb-mobile/porting/scripts')
@@ -36,11 +38,10 @@ s = p.read_text()
 start = s.index('# Hack files')
 end = s.index('cmake --build', start)
 s = s[:start] + s[end:]
-s = '\n'.join(line for line in s.splitlines() if 'git checkout 20240722.0' not in line)
 p.write_text(s + '\n')
 p = base / 'make-adb.sh'
 s = p.read_text().replace('git am --abort)', 'git am --abort || true)')
-s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Release \\
+s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Debug \\
     -DANDROID_TOOLS_USE_BUNDLED_FMT=ON \\
     -DProtobuf_INCLUDE_DIR="$SOURCE_ROOT/external/protobuf/src" \\
     -DProtobuf_LIBRARY="$FULL_OUTPUT/libprotobuf.a" \\
@@ -63,9 +64,12 @@ OUTPUT=libs bash -e -c "$(sed '/^build_target SIMULATOR/d; /^ls -la/,$d' scripts
 OUTPUT=libs bash -e -c "$(sed '/^build_target "iphonesimulator/d' scripts/make-ffmpeg.sh)" scripts/make-ffmpeg.sh
 
 cd "$ROOT/external/OpenSSL-for-iPhone"
-./build-libssl.sh --disable-bitcode --deprecated --targets="ios-cross-arm64"
+./build-libssl.sh --disable-bitcode --targets="ios-cross-arm64"
 cp bin/iPhoneOS*-arm64.sdk/lib/*.a "$ROOT/porting/libs/iphoneos/arm64/"
-cp -R include/openssl "$ROOT/porting/libs/include/"
+# The release's checked-in 1.1.1w headers keep compatibility macros available
+# to its VNC sources while the library itself is built without deprecated APIs.
+# Reuse those exact headers instead of enabling extra OpenSSL functions.
+cp -R "$ROOT/build/upstream-v4.6.0/include/openssl" "$ROOT/porting/libs/include/"
 fi
 
 cd "$ROOT/porting"

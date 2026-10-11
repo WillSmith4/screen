@@ -5,19 +5,10 @@ SOURCE="$ROOT/external/libvncserver"
 LIBS="$ROOT/porting/libs"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 cp "$ROOT/porting/cmake/CMakeLists.vncserver.txt" "$SOURCE/CMakeLists.txt"
-# The pinned client uses BIGNUM functions without directly including their header.
-python3 - "$SOURCE/common/crypto_openssl.c" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-if '#include <openssl/bn.h>' not in s:
-    p.write_text(s.replace('#include <openssl/dh.h>', '#include <openssl/dh.h>\n#include <openssl/bn.h>'))
-PY
 # Match the original app's rfbconfig.h: OpenSSL, zlib, threads and miniLZO.
 # Explicit paths prevent CMake finding Homebrew's macOS binaries on the runner.
 cmake -S "$SOURCE" -B "$ROOT/build/vnc-ios" \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_TOOLCHAIN_FILE="$ROOT/ios-cmake/ios.toolchain.cmake" \
   -DPLATFORM=OS64 -DDEPLOYMENT_TARGET=15.0 -DBUILD_SHARED_LIBS=OFF \
   -DOPENSSL_INCLUDE_DIR="$LIBS/include" \

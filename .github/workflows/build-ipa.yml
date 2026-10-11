@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     defaults:
       run:
@@ -21,8 +21,11 @@ jobs:
         run: git submodule update --init --recursive --depth 1 scrcpy ios-cmake external/adb-mobile external/libvncserver external/OpenSSL-for-iPhone
       - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
+          test "$(xcodebuild -version | tail -1)" = 'Build version 17F113'
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = '26.5'
+          test "$(xcrun --sdk iphoneos --show-sdk-build-version)" = '23F81a'
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -42,11 +45,13 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/gas-preprocessor.pl"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Fetch verified v4.6.0 build reference
+        run: python3 scripts/ci-upstream-reference.py
       - uses: actions/cache/restore@v4
         id: native
         with:
           path: porting/libs
-          key: ios-arm64-xcode26-v3-${{ hashFiles('scripts/ci-build-dependencies.sh', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
+          key: ios-arm64-xcode266-17F113-upstream-v1-${{ hashFiles('scripts/ci-build-dependencies.sh', 'scripts/ci-upstream-reference.py', 'porting/scripts/make-libsdl.sh', 'porting/scripts/make-ffmpeg.sh', 'porting/libtsnet/go.*', '.gitmodules') }}
       - name: Build native dependencies
         if: steps.native.outputs.cache-hit != 'true'
         run: bash scripts/ci-build-dependencies.sh 2>&1 | tee build-dependencies.log
@@ -60,6 +65,8 @@ jobs:
         run: bash scripts/ci-build-vnc.sh 2>&1 | tee build-vnc.log
       - name: Build application and matching Android server
         run: bash scripts/ci-build-ipa.sh
+      - name: Verify v4.6.0 build parity
+        run: python3 scripts/ci-verify-build-parity.py
       - uses: actions/upload-artifact@v4
         with:
           name: ScrcpyRemote-4.6.0-unsigned-IPA
@@ -75,5 +82,7 @@ jobs:
             build-vnc.log
             build/xcodebuild.log
             build/Archive.xcresult
+            build/upstream-v4.6.0/reference.json
+            build/build-parity.json
             scrcpy/server/build/reports/tests
           if-no-files-found: ignore

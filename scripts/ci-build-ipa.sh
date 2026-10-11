@@ -27,4 +27,8 @@ xcodebuild -project 'scrcpy-app/Scrcpy Remote.xcodeproj' -scheme 'Scrcpy Remote'
   archive 2>&1 | tee build/xcodebuild.log
 mkdir -p build/IPA/Payload
 ditto 'build/ScrcpyRemote.xcarchive/Products/Applications/Scrcpy Remote.app' 'build/IPA/Payload/Scrcpy Remote.app'
+# Preserve the two supplemental resources present in the author's release IPA
+# but absent from the published source tree. Their source archive is SHA-pinned.
+cp "$ROOT/build/upstream-v4.6.0/resources/CONTINUOUS_UPDATES_IMPLEMENTATION.md" 'build/IPA/Payload/Scrcpy Remote.app/'
+cp "$ROOT/build/upstream-v4.6.0/resources/Localizable.strings.xml" 'build/IPA/Payload/Scrcpy Remote.app/en.lproj/'
 (cd build/IPA && zip -qry ../ScrcpyRemote-4.6.0-unsigned.ipa Payload)
