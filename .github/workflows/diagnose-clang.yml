@@ -24,18 +24,22 @@ jobs:
           script = next(root.glob('commandline-*.sh'))
           command = shlex.split(script.read_text().splitlines()[-1])
           results = []
-          for variant in ('O1', 'O2', 'O3', 'no-elide', 'no-exceptions', 'gnu++23', 'vendor-revert-off'):
+          source = next(root.glob('commandline-*.cpp')).read_text()
+          anchor = 'const std::optional<FeatureSet>& adb_get_feature_set_or_die(char** out_buf, size_t* out_buf_size) {'
+          assert source.count(anchor) == 1
+          for variant in ('explicit-instantiation', 'return-existing-empty'):
               args = list(command)
-              if variant.startswith('O'):
-                  args.append('-' + variant)
-              if variant == 'no-elide':
-                  args.append('-fno-elide-constructors')
-              if variant == 'no-exceptions':
-                  args = [a for a in args if a not in ('-fcxx-exceptions', '-fexceptions')]
-              if variant == 'gnu++23':
-                  args = [a.replace('-std=gnu++20', '-std=gnu++23') for a in args]
-              if variant == 'vendor-revert-off':
-                  args = [a.replace('-clang-vendor-feature=+revert09abecef7bbf', '-clang-vendor-feature=-revert09abecef7bbf') for a in args]
+              if variant == 'explicit-instantiation':
+                  modified = source.replace(anchor, 'template class std::optional<FeatureSet>;\n' + anchor)
+              else:
+                  start = source.index(anchor)
+                  stop = source.index('\n}', start)
+                  body = source[start:stop]
+                  assert body.count('return std::nullopt;') == 1
+                  modified = source[:start] + body.replace('return std::nullopt;', 'return features;') + source[stop:]
+              path = root / (variant + '.cpp')
+              path.write_text(modified)
+              args[-1] = str(path)
               args += ['-o', str(root / (variant + '.o'))]
               result = subprocess.run(args, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
               (root / (variant + '.log')).write_text(result.stdout)
