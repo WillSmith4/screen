@@ -41,6 +41,8 @@ s = s[:start] + s[end:]
 p.write_text(s + '\n')
 p = base / 'make-adb.sh'
 s = p.read_text().replace('git am --abort)', 'git am --abort || true)')
+# Limit concurrent Clang processes to the hosted runner's available memory.
+s = s.replace('make -j16 ', 'make -j3 VERBOSE=1 ')
 s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Debug \\
     -DANDROID_TOOLS_USE_BUNDLED_FMT=ON \\
     -DProtobuf_INCLUDE_DIR="$SOURCE_ROOT/external/protobuf/src" \\
