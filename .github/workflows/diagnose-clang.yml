@@ -1,0 +1,53 @@
+name: Diagnose upstream ADB compiler crash
+on: workflow_dispatch
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-diagnostics
+          run-id: 38127058527
+          github-token: ${{ github.token }}
+          path: diagnostics
+      - name: Isolate compiler failure without changing sources
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, shlex, subprocess, time
+          root = pathlib.Path('diagnostics/build/clang-diagnostics').resolve()
+          script = next(root.glob('commandline-*.sh'))
+          command = shlex.split(script.read_text().splitlines()[-1])
+          results = []
+          for variant in ('standalone', 'limited', 'line-tables-only', 'none', 'retain-ast'):
+              args = list(command)
+              if variant in ('limited', 'line-tables-only', 'none'):
+                  args = [a for a in args if not a.startswith('-debug-info-kind=')]
+                  if variant != 'none':
+                      args.append('-debug-info-kind=' + variant)
+              if variant == 'retain-ast':
+                  args.remove('-clear-ast-before-backend')
+              args += ['-o', str(root / (variant + '.o'))]
+              result = subprocess.run(args, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              (root / (variant + '.log')).write_text(result.stdout)
+              results.append({'variant': variant, 'returncode': result.returncode})
+              print(json.dumps(results[-1]), flush=True)
+              print(result.stdout[-3000:], flush=True)
+          (root / 'results.json').write_text(json.dumps(results, indent=2))
+          time.sleep(5)
+          PY
+          cp "$HOME"/Library/Logs/DiagnosticReports/clang* diagnostics/build/clang-diagnostics/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clang-isolation-results
+          path: |
+            diagnostics/build/clang-diagnostics/*.log
+            diagnostics/build/clang-diagnostics/results.json
+            diagnostics/build/clang-diagnostics/*.ips
+            diagnostics/build/clang-diagnostics/*.crash
