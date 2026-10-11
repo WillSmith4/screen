@@ -43,12 +43,14 @@ p = base / 'make-adb.sh'
 s = p.read_text().replace('git am --abort)', 'git am --abort || true)')
 # Limit concurrent Clang processes to the hosted runner's available memory.
 s = s.replace('make -j16 ', 'make -j3 VERBOSE=1 ')
+# fmt 10.2 provides this configuration override; keep its version and use its
+# constexpr format checker instead of Clang 21's failing consteval path.
 s = s.replace('-DCMAKE_BUILD_TYPE=Debug ..;', '''-DCMAKE_BUILD_TYPE=Debug \\
     -DANDROID_TOOLS_USE_BUNDLED_FMT=ON \\
     -DProtobuf_INCLUDE_DIR="$SOURCE_ROOT/external/protobuf/src" \\
     -DProtobuf_LIBRARY="$FULL_OUTPUT/libprotobuf.a" \\
     -DProtobuf_PROTOC_EXECUTABLE="$(command -v protoc)" \\
-    -DCMAKE_CXX_FLAGS="-I$SOURCE_ROOT/external/protobuf/third_party/abseil-cpp -I$SOURCE_ROOT/external/protobuf/third_party/googletest/googletest/include -I$SOURCE_ROOT/external/lz4/lib -I$SOURCE_ROOT/external/brotli/c/include -I$SOURCE_ROOT/external/zstd/lib" ..;''')
+    -DCMAKE_CXX_FLAGS="-DFMT_CONSTEVAL= -I$SOURCE_ROOT/external/protobuf/third_party/abseil-cpp -I$SOURCE_ROOT/external/protobuf/third_party/googletest/googletest/include -I$SOURCE_ROOT/external/lz4/lib -I$SOURCE_ROOT/external/brotli/c/include -I$SOURCE_ROOT/external/zstd/lib" ..;''')
 p.write_text(s)
 # Xcode 26.6 crashes while generating the destructor of the temporary returned
 # by this reference-returning function. Return its existing empty optional;
@@ -61,6 +63,12 @@ body = s[start:end]
 assert body.count('return std::nullopt;') == 1, 'ADB compatibility patch site changed'
 p.write_text(s[:start] + body.replace('return std::nullopt;', 'return features;') + s[end:])
 PY
+# Fail early if the pinned fmt sources cannot compile with the selected SDK.
+for source in format os; do
+  xcrun --sdk iphoneos clang++ -std=gnu++20 -arch arm64 -miphoneos-version-min=12.0 \
+    -DFMT_CONSTEVAL= -Iexternal/adb-mobile/android-tools/vendor/fmtlib/include \
+    -c "external/adb-mobile/android-tools/vendor/fmtlib/src/$source.cc" -o "build/fmt-$source.o"
+done
 # android-tools applies its platform patches with git am.
 git config --global user.name 'Scrcpy Remote CI'
 git config --global user.email 'ci@users.noreply.github.com'
