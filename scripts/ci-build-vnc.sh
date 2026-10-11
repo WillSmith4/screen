@@ -5,13 +5,28 @@ SOURCE="$ROOT/external/libvncserver"
 LIBS="$ROOT/porting/libs"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 cp "$ROOT/porting/cmake/CMakeLists.vncserver.txt" "$SOURCE/CMakeLists.txt"
+# The old VNC source uses compatibility macros (e.g. SSLeay -> OpenSSL) which
+# the release's no-deprecated configuration headers hide. Expose those aliases
+# only for this compilation; retain the original no-deprecated library binary.
+VNC_HEADERS="$ROOT/build/vnc-headers"
+mkdir -p "$VNC_HEADERS"
+cp -R "$ROOT/build/upstream-v4.6.0/include/openssl" "$VNC_HEADERS/"
+python3 - "$VNC_HEADERS/openssl/opensslconf_ios_arm64.h" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+original = '#define OPENSSL_MIN_API 0x10100000L'
+assert s.count(original) == 1, 'OpenSSL compatibility configuration changed'
+p.write_text(s.replace(original, '#define OPENSSL_MIN_API 0'))
+PY
 # Match the original app's rfbconfig.h: OpenSSL, zlib, threads and miniLZO.
 # Explicit paths prevent CMake finding Homebrew's macOS binaries on the runner.
 cmake -S "$SOURCE" -B "$ROOT/build/vnc-ios" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_TOOLCHAIN_FILE="$ROOT/ios-cmake/ios.toolchain.cmake" \
   -DPLATFORM=OS64 -DDEPLOYMENT_TARGET=15.0 -DBUILD_SHARED_LIBS=OFF \
-  -DOPENSSL_INCLUDE_DIR="$LIBS/include" \
+  -DOPENSSL_INCLUDE_DIR="$VNC_HEADERS" \
   -DOPENSSL_SSL_LIBRARY="$LIBS/iphoneos/arm64/libssl.a" \
   -DOPENSSL_CRYPTO_LIBRARY="$LIBS/iphoneos/arm64/libcrypto.a" \
   -DZLIB_INCLUDE_DIR="$SDK/usr/include" -DZLIB_LIBRARY="$SDK/usr/lib/libz.tbd" \
