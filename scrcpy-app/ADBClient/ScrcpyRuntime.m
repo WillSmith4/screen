@@ -12,6 +12,8 @@
 #import <math.h>
 #import <libavutil/frame.h>
 #import "ScrcpyRuntime.h"
+#import "ScrcpyFramePresenter.h"
+#import "frame-pacing.h"
 #import "scrcpy-porting.h"
 #import "app/config.h"
 
@@ -81,6 +83,61 @@ static int g_episodeResetCount = 0;  // resets attempted during this episode
 static const CFAbsoluteTime kStallBeforeRecoverySeconds = 2.0;
 static const CFAbsoluteTime kRecoveryCooldownSeconds = 1.0;  // Minimum time between recovery attempts
 
+static void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer,
+                                  AVSampleBufferDisplayLayer *displayLayer,
+                                  CFTimeInterval targetTimestamp);
+
+static ScrcpyFramePresenter *FramePresenter(void) {
+    static ScrcpyFramePresenter *presenter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CVPixelBufferRef buffer,
+                AVSampleBufferDisplayLayer *layer, CFTimeInterval target) {
+            RenderPixelBufferFrame(buffer, layer, target);
+        }];
+    });
+    return presenter;
+}
+
+extern void ScrcpySetLowLatencyEventPump(bool enabled);
+
+int ScrcpyVideoFrameRate(int requested) {
+    UIScreen *screen = GetCurrentWindowScene().screen ?: UIScreen.mainScreen;
+    return sc_display_frame_rate(requested, (int)screen.maximumFramesPerSecond);
+}
+
+void StartScrcpyVideoPresentation(int frameRate) {
+    ScrcpySetLowLatencyEventPump(true);
+    [FramePresenter() startWithFrameRate:frameRate];
+}
+
+void StopScrcpyVideoPresentation(void) {
+    [FramePresenter() stop];
+    ScrcpySetLowLatencyEventPump(false);
+    g_consecutiveDropCount = g_totalDropCount = 0;
+    g_stallStartTime = g_episodeStartTime = g_lastRecoveryTime = 0;
+    g_episodeDropCount = g_episodeResetCount = 0;
+}
+
+void AttachScrcpyVideoPresentation(UIView *view) {
+    [FramePresenter() attachToView:view hardwareDecoding:ScrcpyEnableHardwareDecoding() == 1];
+}
+
+bool ScrcpyGetViewSize(uint32_t windowID, int *width, int *height) {
+    // Called by scrcpy's main-thread input/render path. The native window
+    // property identifies the correct scene instead of the physical screen.
+    if (!NSThread.isMainThread) { return false; }
+    SDL_Window *window = SDL_GetWindowFromID(windowID);
+    if (!window) { return false; }
+    UIWindow *nativeWindow = (__bridge UIWindow *)SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
+    UIView *view = nativeWindow.rootViewController.view;
+    if (!view || view.bounds.size.width <= 0 || view.bounds.size.height <= 0) { return false; }
+    *width = (int)view.bounds.size.width;
+    *height = (int)view.bounds.size.height;
+    return true;
+}
+
 const char *ScrcpyCoreVersion(void)
 {
     return SCRCPY_VERSION;
@@ -97,6 +154,11 @@ void SetScrcpyHardwareDecodingEnabled(BOOL enabled) {
 
 void SetApplicationBackgroundState(BOOL inBackground) {
     bApplicationInBackground = inBackground;
+    if (NSThread.isMainThread) {
+        [FramePresenter() setPaused:inBackground];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{ [FramePresenter() setPaused:inBackground]; });
+    }
     NSLog(@"[ScrcpyRuntime] SetApplicationBackgroundState → %@", inBackground ? @"background" : @"foreground");
 }
 
@@ -191,7 +253,7 @@ int ScrcpyEnableHardwareDecoding(void)
 {
     // To enable hardware decoding if target not simulator
 #if TARGET_OS_SIMULATOR
-    return ScrcpyHardwareDecodingDisabled
+    return ScrcpyHardwareDecodingDisabled;
 #else
     return (int)bScrcpyHardwareDecodingEnabled;
 #endif
@@ -204,40 +266,9 @@ float ScrcpyAudioVolumeScale(float update_scale)
     return volume_scale;
 }
 
-AVSampleBufferDisplayLayer *GetSampleBufferDisplayLayer(void)
-{
-    @autoreleasepool {
-        static AVSampleBufferDisplayLayer *displayLayer = nil;
-        if (displayLayer != nil && displayLayer.superlayer != nil) {
-            return displayLayer;
-        }
-        
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            @autoreleasepool {
-                [displayLayer removeFromSuperlayer];
-                displayLayer = [AVSampleBufferDisplayLayer layer];
-                displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-                
-                UIWindow *sdlWindow = GetCurrentWindowScene().keyWindow;
-                
-                // Skip when no SDL window found
-                if (sdlWindow == nil) {
-                    return;
-                }
-                
-                displayLayer.frame = sdlWindow.rootViewController.view.bounds;
-                [sdlWindow.rootViewController.view.layer addSublayer:displayLayer];
-                sdlWindow.rootViewController.view.backgroundColor = UIColor.blackColor;
-                // sometimes failed to set background color, so we append to next runloop
-                displayLayer.backgroundColor = UIColor.blackColor.CGColor;
-            }
-        });
-
-        return displayLayer;
-    }
-}
-
-void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer) {
+static void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer,
+                                  AVSampleBufferDisplayLayer *displayLayer,
+                                  CFTimeInterval targetTimestamp) {
     @autoreleasepool {
         if (pixelBuffer == NULL) { return; }
 
@@ -246,8 +277,6 @@ void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer) {
         int frameHeight = (int)CVPixelBufferGetHeight(pixelBuffer);
         CheckAndNotifyOrientationChange(frameWidth, frameHeight);
 
-        // Get rendering layer first to check its status
-        AVSampleBufferDisplayLayer *displayLayer = GetSampleBufferDisplayLayer();
         if (!displayLayer) {
             return;
         }
@@ -394,7 +423,11 @@ void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer) {
         g_stallStartTime = 0;
 
         // Create sample buffer for rendering
-        CMSampleTimingInfo timing = {kCMTimeInvalid, kCMTimeInvalid, kCMTimeInvalid};
+        // Convert the display deadline to the layer's host-clock timebase.
+        // Late jobs use now, never an old network PTS or a growing FIFO.
+        CMTime presentationTime = CMTimeAdd(CMClockGetTime(CMClockGetHostTimeClock()),
+            CMTimeMakeWithSeconds(MAX(0, targetTimestamp - CACurrentMediaTime()), NSEC_PER_SEC));
+        CMSampleTimingInfo timing = {kCMTimeInvalid, presentationTime, kCMTimeInvalid};
         CMVideoFormatDescriptionRef videoInfo = NULL;
         OSStatus result = CMVideoFormatDescriptionCreateForImageBuffer(NULL, pixelBuffer, &videoInfo);
 
@@ -410,10 +443,6 @@ void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer) {
             CFRelease(videoInfo);
             return;
         }
-
-        CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, YES);
-        CFMutableDictionaryRef dict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
-        CFDictionarySetValue(dict, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
 
         // Render the sample buffer
         if (@available(iOS 17.0, *)) {
@@ -445,7 +474,7 @@ AVFrame * ScrcpyHandleFrame(AVFrame *frame) {
     }
    
     if (ScrcpyEnableHardwareDecoding() == ScrcpyHardwareDecodingLayerRender) {
-        RenderPixelBufferFrame(pixelBuffer);
+        [FramePresenter() submitPixelBuffer:pixelBuffer];
         return frame;
     }
     

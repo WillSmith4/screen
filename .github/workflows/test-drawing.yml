@@ -46,11 +46,20 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
       - name: Test drawing settings and protocol
         run: bash scripts/test-drawing-toolkit.sh
+      - name: Test congested touch input and frame rate normalization
+        run: |
+          git submodule update --init --depth 1 scrcpy
+          brew install sdl3 pkg-config
+          bash scripts/test-streaming-input.sh
+      - name: Test frame ownership, backlog and reconnect in iPad simulator
+        run: bash scripts/test-frame-presenter.sh
       - name: Capture production drawing views in iPad simulator
         run: bash scripts/capture-drawing-ui.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: Drawing-Toolkit-UI
-          path: build/screenshots
+          path: |
+            build/screenshots
+            build/tests/presenter-results.json
           if-no-files-found: ignore

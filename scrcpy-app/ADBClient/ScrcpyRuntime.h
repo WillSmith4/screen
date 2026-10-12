@@ -16,6 +16,11 @@ extern NSString * const ScrcpyRemoteOrientationChangedNotification;
 float ScrcpyAudioVolumeScale(float update_scale);
 const char *ScrcpyCoreVersion(void);
 void SetScrcpyHardwareDecodingEnabled(BOOL enabled);
+int ScrcpyEnableHardwareDecoding(void);
+int ScrcpyVideoFrameRate(int requested);
+void StartScrcpyVideoPresentation(int frameRate);
+void StopScrcpyVideoPresentation(void);
+void AttachScrcpyVideoPresentation(UIView *view);
 void SetScrcpyFollowRemoteOrientation(BOOL enabled);
 void ResetScrcpyOrientationTracking(void);
 

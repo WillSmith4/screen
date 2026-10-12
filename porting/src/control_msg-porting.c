@@ -33,6 +33,11 @@ void sc_control_msg_destroy(struct sc_control_msg *msg) {
 }
 
 bool sc_control_msg_is_droppable(const struct sc_control_msg *msg) {
+    if (msg->type == SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT) {
+        // Losing an UP leaves Android with a permanently pressed finger.
+        return msg->inject_touch_event.action == AMOTION_EVENT_ACTION_MOVE
+            || msg->inject_touch_event.action == AMOTION_EVENT_ACTION_HOVER_MOVE;
+    }
     if ((unsigned) msg->type == SC_DRAWING_KEY_MESSAGE_TYPE) { return false; }
     if ((unsigned) msg->type == SC_STYLUS_MESSAGE_TYPE) {
         uint8_t action = (uint8_t) msg->inject_text.text[2];

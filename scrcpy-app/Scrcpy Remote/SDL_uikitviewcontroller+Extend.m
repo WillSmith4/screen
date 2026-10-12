@@ -131,6 +131,7 @@ static char orientationLockEnabledKey;
 - (void)viewWillLayoutSubviews
 {
     [super viewWillLayoutSubviews];
+    AttachScrcpyVideoPresentation(self.view);
 
     // Update video layer frame
     for (CALayer *layer in self.view.layer.sublayers) {
@@ -204,7 +205,7 @@ static char orientationLockEnabledKey;
     }
 
     if (sdlWindow) {
-        if (sdlWidth != newWidth || sdlHeight != newHeight) {
+        if (force || sdlWidth != newWidth || sdlHeight != newHeight) {
             NSLog(@"📐 [StageManager] Window size mismatch detected - SDL: %dx%d, Actual: %dx%d",
                   sdlWidth, sdlHeight, newWidth, newHeight);
 
@@ -263,6 +264,7 @@ static char orientationLockEnabledKey;
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
+    AttachScrcpyVideoPresentation(self.view);
     [ScrcpyPencilRouting attachToView:self.view];
 
     // Hide the home indicator (value 1) AND defer the system screen-edge

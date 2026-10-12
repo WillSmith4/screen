@@ -45,7 +45,9 @@ def main():
             # The hosted runner's macOS patch/build is not the author's Mac.
             # Record that difference; never disguise it by rewriting metadata.
             for key in sorted(a.keys() | b.keys()):
-                if key != "BuildMachineOSBuild":
+                if relative == "Info.plist" and key == "CADisableMinimumFrameDurationOnPhone":
+                    check("ProMotion presentation explicitly enabled", b.get(key) is True)
+                elif key != "BuildMachineOSBuild":
                     check(f"{relative}: {key}", a.get(key) == b.get(key))
 
         binaries = ("Scrcpy Remote", "Frameworks/VNCClient.framework/VNCClient",
@@ -83,6 +85,7 @@ def main():
             "original_build_machine": original_info.get("BuildMachineOSBuild"),
             "rebuilt_build_machine": rebuilt_info.get("BuildMachineOSBuild"),
             "intentional_differences": ["Drawing Toolkit implementation", "Unsigned IPA instead of author's Ad Hoc signature",
+                                       "Display-paced presentation and touch latency fixes; ProMotion Info.plist opt-in",
                                        "Hosted runner macOS build metadata", "Recompiled code/assets and build identifiers"],
             "limits": "Static build parity checks do not prove identical runtime rendering or diagnose the AVD image issue.",
         }

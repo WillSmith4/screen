@@ -20,6 +20,9 @@
 #include <SDL3/SDL.h>
 
 #include "scrcpy-porting.h"
+#include "ios-geometry.h"
+
+#define sc_sdl_get_window_size sc_ios_window_size
 
 static void SDL_DestroyWindow_hijack(SDL_Window *window);
 
@@ -167,6 +170,11 @@ sc_screen_log_geometry_if_changed(struct sc_screen *screen) {
 
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+    // Refresh from the live UIView even when a restore kept identical bounds
+    // and SDL did not generate a resize. This also covers Pencil mapping.
+    if (screen->window && screen->video) {
+        sc_screen_update_content_rect(screen);
+    }
     extern bool sc_stylus_handle_event(struct sc_screen *, const SDL_Event *);
     if (sc_stylus_handle_event(screen, event)) {
         return;
