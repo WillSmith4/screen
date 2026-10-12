@@ -9,6 +9,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <SDL3/SDL.h>
 #import <math.h>
 #import <libavutil/frame.h>
 #import "ScrcpyRuntime.h"

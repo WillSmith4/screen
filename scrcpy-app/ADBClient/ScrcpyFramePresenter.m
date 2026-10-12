@@ -1,5 +1,6 @@
 #import "ScrcpyFramePresenter.h"
 #import "frame-pacing.h"
+#import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
 
 @implementation ScrcpyFramePresenter {

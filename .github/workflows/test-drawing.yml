@@ -49,7 +49,7 @@ jobs:
       - name: Test congested touch input and frame rate normalization
         run: |
           git submodule update --init --depth 1 scrcpy
-          brew install sdl3 pkg-config
+          brew install sdl3 ffmpeg pkg-config
           bash scripts/test-streaming-input.sh
       - name: Test frame ownership, backlog and reconnect in iPad simulator
         run: bash scripts/test-frame-presenter.sh

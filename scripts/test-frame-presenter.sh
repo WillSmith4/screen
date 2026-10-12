@@ -7,7 +7,7 @@ xcrun clang -fobjc-arc -fmodules tests/EventPumpTests.m \
   scrcpy-app/VNCClient/ScrcpyCommonRuntime.m -framework Foundation -o build/tests/test-event-pump
 build/tests/test-event-pump
 SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-xcrun clang -fobjc-arc -fmodules -isysroot "$SDK" -target arm64-apple-ios18.0-simulator \
+xcrun clang -fobjc-arc -fmodules -isysroot "$SDK" -target arm64-apple-ios17.0-simulator \
   -Iporting/include -Iscrcpy-app/ADBClient tests/FramePresenterTests.m \
   scrcpy-app/ADBClient/ScrcpyFramePresenter.m \
   -framework UIKit -framework AVFoundation -framework QuartzCore -framework CoreMedia -framework CoreVideo \
@@ -20,7 +20,7 @@ cat > "$APP/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Frame Presenter Tests</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>MinimumOSVersion</key><string>18.0</string>
+<key>MinimumOSVersion</key><string>17.0</string>
 <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
 <key>CADisableMinimumFrameDurationOnPhone</key><true/>
 <key>UILaunchScreen</key><dict/>
