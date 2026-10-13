@@ -1,5 +1,6 @@
 #import "ScrcpyFramePresenter.h"
 #import "frame-pacing.h"
+#import "ScrcpyMetalRenderer.h"
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
 
@@ -15,6 +16,8 @@
     int _requestedFrameRate;
     uint64_t _generation, _decoded, _replaced, _renderCalls, _ticks;
     CFTimeInterval _metricsStart;
+    BOOL _useMetal;
+    ScrcpyMetalRenderer *_metal;
 }
 
 - (instancetype)initWithRenderer:(void (^)(CVPixelBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval))renderer {
@@ -28,8 +31,13 @@
 }
 
 - (void)startWithFrameRate:(int)frameRate {
+    [self startWithFrameRate:frameRate useMetal:NO];
+}
+
+- (void)startWithFrameRate:(int)frameRate useMetal:(BOOL)useMetal {
     NSAssert(NSThread.isMainThread, @"Presenter lifecycle must run on main");
     [self stop];
+    _useMetal = useMetal;
     _requestedFrameRate = frameRate;
     os_unfair_lock_lock(&_lock);
     _running = YES;
@@ -46,11 +54,19 @@
     if (_view != view) {
         // Drain presentation before moving its layer to a different view.
         dispatch_sync(_renderQueue, ^{});
+        [_metal drain];
+        [_metal.layer removeFromSuperlayer];
+        _metal = nil;
         [_layer removeFromSuperlayer];
         _view = view;
         _layer = nil;
     }
-    if (hardwareDecoding && !_layer) {
+    if (hardwareDecoding && _useMetal && !_metal) {
+        _metal = [ScrcpyMetalRenderer new];
+        if (_metal) { [view.layer addSublayer:_metal.layer]; }
+        NSLog(@"[FramePacing] renderer=%@", _metal ? @"Metal (Experimental)" : @"Metal unavailable; select Standard and reconnect");
+    }
+    if (hardwareDecoding && !_useMetal && !_layer) {
         _layer = [AVSampleBufferDisplayLayer layer];
         _layer.videoGravity = AVLayerVideoGravityResizeAspect;
         _layer.backgroundColor = UIColor.blackColor.CGColor;
@@ -63,11 +79,16 @@
             CFRelease(timebase);
         }
         [view.layer addSublayer:_layer];
+        NSLog(@"[FramePacing] renderer=Standard (AVSampleBufferDisplayLayer)");
     }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _layer.frame = view.bounds;
     _layer.contentsScale = view.window.screen.scale;
+    _metal.layer.frame = view.bounds;
+    _metal.layer.contentsScale = view.window.screen.scale;
+    _metal.layer.drawableSize = CGSizeMake(view.bounds.size.width * view.window.screen.scale,
+                                           view.bounds.size.height * view.window.screen.scale);
     [CATransaction commit];
 
     if (!_displayLink) {
@@ -117,7 +138,7 @@
         _metricsStart = now;
         os_unfair_lock_lock(&_lock);
     }
-    if (!_running || _paused || !_pending || _workScheduled || !layer) {
+    if (!_running || _paused || !_pending || _workScheduled || (!layer && !_metal)) {
         os_unfair_lock_unlock(&_lock);
         return;
     }
@@ -137,7 +158,10 @@
             }
             os_unfair_lock_unlock(&self->_lock);
             if (frame) {
-                self->_renderer(frame, layer, target);
+                // The session's explicit setting selects exactly one backend.
+                // Busy GPU work drops presentation, never switches renderers.
+                if (self->_useMetal) { [self->_metal renderPixelBuffer:frame targetTime:target]; }
+                else { self->_renderer(frame, layer, target); }
                 CVPixelBufferRelease(frame);
             }
             os_unfair_lock_lock(&self->_lock);
@@ -160,7 +184,7 @@
     if (old) { CVPixelBufferRelease(old); }
     _displayLink.paused = paused;
     // No synchronous dispatch to main occurs on the presentation worker.
-    dispatch_sync(_renderQueue, ^{ [self->_layer flush]; });
+    dispatch_sync(_renderQueue, ^{ [self->_layer flush]; [self->_metal drain]; });
     _ticks = 0;
     _metricsStart = CACurrentMediaTime();
 }
@@ -176,7 +200,9 @@
     _pending = NULL;
     os_unfair_lock_unlock(&_lock);
     if (old) { CVPixelBufferRelease(old); }
-    dispatch_sync(_renderQueue, ^{ [self->_layer flushAndRemoveImage]; });
+    dispatch_sync(_renderQueue, ^{ [self->_layer flushAndRemoveImage]; [self->_metal drain]; });
+    [_metal.layer removeFromSuperlayer];
+    _metal = nil;
     [_layer removeFromSuperlayer];
     _layer = nil;
     _view = nil;

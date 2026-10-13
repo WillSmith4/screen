@@ -10,7 +10,8 @@ SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 xcrun clang -fobjc-arc -fmodules -isysroot "$SDK" -target arm64-apple-ios17.0-simulator \
   -Iporting/include -Iscrcpy-app/ADBClient tests/FramePresenterTests.m \
   scrcpy-app/ADBClient/ScrcpyFramePresenter.m \
-  -framework UIKit -framework AVFoundation -framework QuartzCore -framework CoreMedia -framework CoreVideo \
+  scrcpy-app/ADBClient/ScrcpyMetalRenderer.m \
+  -framework UIKit -framework AVFoundation -framework QuartzCore -framework CoreMedia -framework CoreVideo -framework Metal \
   -o "$APP/FramePresenterTests"
 cat > "$APP/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

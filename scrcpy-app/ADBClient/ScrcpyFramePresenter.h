@@ -6,6 +6,7 @@
 @interface ScrcpyFramePresenter : NSObject
 - (instancetype)initWithRenderer:(void (^)(CVPixelBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval))renderer;
 - (void)startWithFrameRate:(int)frameRate;
+- (void)startWithFrameRate:(int)frameRate useMetal:(BOOL)useMetal;
 - (void)attachToView:(UIView *)view hardwareDecoding:(BOOL)hardwareDecoding;
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer;
 - (void)setPaused:(BOOL)paused;

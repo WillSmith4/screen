@@ -109,7 +109,8 @@ int ScrcpyVideoFrameRate(int requested) {
 
 void StartScrcpyVideoPresentation(int frameRate) {
     ScrcpySetLowLatencyEventPump(true);
-    [FramePresenter() startWithFrameRate:frameRate];
+    BOOL useMetal = [NSUserDefaults.standardUserDefaults integerForKey:@"settings.video.rendering_mode"] == 1;
+    [FramePresenter() startWithFrameRate:frameRate useMetal:useMetal];
 }
 
 void StopScrcpyVideoPresentation(void) {
@@ -272,11 +273,6 @@ static void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer,
                                   CFTimeInterval targetTimestamp) {
     @autoreleasepool {
         if (pixelBuffer == NULL) { return; }
-
-        // Check for orientation change based on frame dimensions
-        int frameWidth = (int)CVPixelBufferGetWidth(pixelBuffer);
-        int frameHeight = (int)CVPixelBufferGetHeight(pixelBuffer);
-        CheckAndNotifyOrientationChange(frameWidth, frameHeight);
 
         if (!displayLayer) {
             return;
@@ -475,6 +471,8 @@ AVFrame * ScrcpyHandleFrame(AVFrame *frame) {
     }
    
     if (ScrcpyEnableHardwareDecoding() == ScrcpyHardwareDecodingLayerRender) {
+        CheckAndNotifyOrientationChange((int)CVPixelBufferGetWidth(pixelBuffer),
+                                       (int)CVPixelBufferGetHeight(pixelBuffer));
         [FramePresenter() submitPixelBuffer:pixelBuffer];
         return frame;
     }

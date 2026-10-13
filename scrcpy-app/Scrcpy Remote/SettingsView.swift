@@ -50,6 +50,10 @@ class AppSettings: ObservableObject {
     
     @AppStorage("settings.background_active_duration")
     var backgroundActiveDuration: BackgroundActiveDuration = .fiveMinutes
+
+    // Read by ScrcpyRuntime when a new streaming session starts.
+    @AppStorage("settings.video.rendering_mode")
+    var renderingMode: Int = 0
     
     // Logging related settings
     @AppStorage("settings.logging.enabled")
@@ -303,6 +307,17 @@ struct SettingsView: View {
 
                     NavigationLink(destination: AboutView()) {
                         Text("About Scrcpy Remote")
+                    }
+                }
+                Section(header: Text("Video"), footer: Text("Applies to the next connection with hardware decoding enabled.")) {
+                    VStack(alignment: .leading) {
+                        Text("Rendering Mode")
+                        Picker("Rendering Mode", selection: $appSettings.renderingMode) {
+                            Text("Standard").tag(0)
+                            Text("Metal (Experimental)").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("rendering-mode")
                     }
                 }
                 Section(header: Text("Networking")) {

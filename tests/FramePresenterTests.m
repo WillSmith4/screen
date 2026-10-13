@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <stdatomic.h>
 #import "ScrcpyFramePresenter.h"
+#import <QuartzCore/CAMetalLayer.h>
 
 static _Atomic(int) created, released, delivered, lastSequence;
 static dispatch_semaphore_t slowRenderer;
@@ -148,8 +149,28 @@ static CVPixelBufferRef makeFrame(int sequence) {
         CHECK(atomic_load(&lastSequence) == 50000);
         [self.presenter stop];
         CHECK(atomic_load(&created) == atomic_load(&released));
+        // The saved mode is applied at session start. Only its own layer may
+        // exist; switching modes must remove the previous session's backend.
+        UIView *view = self.window.rootViewController.view;
+        [self.presenter startWithFrameRate:120 useMetal:YES];
+        [self.presenter attachToView:view hardwareDecoding:YES];
+        CHECK([self countLayers:CAMetalLayer.class inView:view] == 1);
+        CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 0);
+        [self.presenter startWithFrameRate:120 useMetal:NO];
+        [self.presenter attachToView:view hardwareDecoding:YES];
+        CHECK([self countLayers:CAMetalLayer.class inView:view] == 0);
+        CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 1);
+        [self.presenter stop];
         finish(nil);
     });
+}
+
+- (NSUInteger)countLayers:(Class)type inView:(UIView *)view {
+    NSUInteger count = 0;
+    for (CALayer *layer in view.layer.sublayers) {
+        if ([layer isKindOfClass:type]) { ++count; }
+    }
+    return count;
 }
 @end
 
