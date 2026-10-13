@@ -9,7 +9,7 @@
     CMVideoFormatDescriptionRef _format;
     NSMutableDictionary<NSNumber *, NSData *> *_parameters;
     NSObject *_outputLock;
-    void (^_output)(CVPixelBufferRef, int64_t);
+    void (^_output)(CVPixelBufferRef, int64_t, BOOL);
     void (^_recovery)(OSStatus);
     dispatch_semaphore_t _slots;
     _Atomic(bool) _needsReset;
@@ -18,7 +18,7 @@
 }
 
 - (instancetype)initWithCodec:(CMVideoCodecType)codec requireHardware:(BOOL)requireHardware
-                      output:(void (^)(CVPixelBufferRef, int64_t))output
+                      output:(void (^)(CVPixelBufferRef, int64_t, BOOL))output
                     recovery:(void (^)(OSStatus))recovery {
     if ((self = [super init])) {
         _codec = codec;
@@ -210,7 +210,7 @@
                             // Late callbacks never move the visible image backwards.
                             if (outputPTS >= self->_lastOutputPTS && !atomic_load(&self->_needsReset)) {
                                 self->_lastOutputPTS = outputPTS;
-                                self->_output(image, outputPTS);
+                                self->_output(image, outputPTS, keyframe);
                             }
                         }
                     }

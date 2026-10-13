@@ -39,7 +39,7 @@ static void native_buffer_free(void *opaque, uint8_t *data) {
     ScrcpyReleasePixelBuffer(opaque);
 }
 
-static void native_frame(void *userdata, void *pixel_buffer, int width, int height, int64_t pts) {
+static void native_frame(void *userdata, void *pixel_buffer, int width, int height, int64_t pts, bool keyframe) {
     struct sc_decoder *decoder = userdata;
     AVFrame *frame = av_frame_alloc();
     if (!frame) { atomic_store(&native_video.sink_failed, true); return; }
@@ -56,6 +56,7 @@ static void native_frame(void *userdata, void *pixel_buffer, int width, int heig
     frame->width = width;
     frame->height = height;
     frame->pts = pts;
+    if (keyframe) { frame->flags |= AV_FRAME_FLAG_KEY; }
     // AVFrame is only an ownership/geometry envelope here. No FFmpeg decode
     // or conversion occurs; recording continues to receive original packets.
     ScrcpyHandleFrame(frame);

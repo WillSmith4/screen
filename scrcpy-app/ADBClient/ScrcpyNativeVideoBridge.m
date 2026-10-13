@@ -19,8 +19,8 @@ bool ScrcpyNativeVideoSupported(int codec) {
 
 void *ScrcpyNativeVideoCreate(int codec, sc_native_video_output output, void *userdata) {
     ScrcpyVideoDecoder *decoder = [[ScrcpyVideoDecoder alloc] initWithCodec:codecType(codec)
-        requireHardware:YES output:^(CVPixelBufferRef buffer, int64_t pts) {
-            output(userdata, buffer, (int)CVPixelBufferGetWidth(buffer), (int)CVPixelBufferGetHeight(buffer), pts);
+        requireHardware:YES output:^(CVPixelBufferRef buffer, int64_t pts, BOOL keyframe) {
+            output(userdata, buffer, (int)CVPixelBufferGetWidth(buffer), (int)CVPixelBufferGetHeight(buffer), pts, keyframe);
         } recovery:^(OSStatus status) { ScrcpyTryResetVideo(); }];
     return (__bridge_retained void *)decoder;
 }

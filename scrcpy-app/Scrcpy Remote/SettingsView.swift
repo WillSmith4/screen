@@ -54,6 +54,12 @@ class AppSettings: ObservableObject {
     // Read by ScrcpyRuntime when a new streaming session starts.
     @AppStorage("settings.video.rendering_mode")
     var renderingMode: Int = 0
+
+    @AppStorage("settings.video.frames_to_buffer")
+    var framesToBuffer: Int = 1
+
+    @AppStorage("settings.video.async_frame_dequeue")
+    var asyncFrameDequeue: Bool = true
     
     // Logging related settings
     @AppStorage("settings.logging.enabled")
@@ -318,6 +324,18 @@ struct SettingsView: View {
                         }
                         .pickerStyle(.segmented)
                         .accessibilityIdentifier("rendering-mode")
+                    }
+                    if appSettings.renderingMode == 0 {
+                        HStack {
+                            Text("Frame Pacing")
+                            Spacer()
+                            Text("Queue Buffering").foregroundColor(.secondary)
+                        }
+                        Picker("Frames to Buffer", selection: $appSettings.framesToBuffer) {
+                            Text("0 (Lowest Latency)").tag(0)
+                            ForEach(1...5, id: \.self) { Text("\($0)").tag($0) }
+                        }
+                        Toggle("Async Frame Dequeue", isOn: $appSettings.asyncFrameDequeue)
                     }
                 }
                 Section(header: Text("Networking")) {

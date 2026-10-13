@@ -53,6 +53,8 @@ jobs:
           bash scripts/test-streaming-input.sh
       - name: Test native H264 HEVC decoding and Metal GPU pixels
         run: bash scripts/test-native-video.sh
+      - name: Compare frame queue behavior with VoidLink reference
+        run: bash scripts/test-frame-queue.sh
       - name: Test frame ownership, rendering selection, backlog and reconnect in iPad simulator
         run: bash scripts/test-frame-presenter.sh
       - name: Capture production drawing views in iPad simulator
@@ -65,4 +67,5 @@ jobs:
             build/screenshots
             build/tests/presenter-results.json
             build/tests/native-video-results.txt
+            build/tests/frame-queue-results.txt
           if-no-files-found: ignore

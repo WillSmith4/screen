@@ -31,11 +31,12 @@ static void testDecode(NSString *directory, NSString *extension, CMVideoCodecTyp
     atomic_store(&outputs, 0);
     atomic_store(&recoveries, 0);
     ScrcpyVideoDecoder *decoder = [[ScrcpyVideoDecoder alloc] initWithCodec:codec requireHardware:NO
-        output:^(CVPixelBufferRef image, int64_t pts) {
+        output:^(CVPixelBufferRef image, int64_t pts, BOOL keyframe) {
             assert(CVPixelBufferGetWidth(image) == expectedWidth);
             assert(CVPixelBufferGetHeight(image) == expectedHeight);
             assert(CVPixelBufferGetPlaneCount(image) == 2);
             assert(CVPixelBufferGetIOSurface(image));
+            assert(keyframe == (pts == 0));
             atomic_fetch_add(&outputs, 1);
         } recovery:^(OSStatus status) { atomic_fetch_add(&recoveries, 1); }];
     for (int pass = 0; pass < 3; ++pass) {

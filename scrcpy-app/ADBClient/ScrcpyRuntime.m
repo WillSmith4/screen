@@ -42,60 +42,20 @@ static BOOL lastWasLandscape = NO;
 // Notification name for remote orientation change
 NSString * const ScrcpyRemoteOrientationChangedNotification = @"ScrcpyRemoteOrientationChangedNotification";
 
-// Render recovery statistics
-//
-// A full AVSampleBufferDisplayLayer queue is normal back-pressure, not a
-// failure: a high-contrast scene change (or any hard cut) produces a burst of
-// large frames, and the layer briefly reports !isReadyForMoreMediaData while it
-// drains. Dropping those frames is the correct response and the picture keeps
-// moving.
-//
-// Escalating that to [flush] + reset-video is not: flush empties the queue
-// (instant black) and reset-video restarts the *server-side encoder*, so
-// nothing can be shown until a fresh IDR arrives. If the post-restart keyframe
-// burst fills the queue again the cycle repeats, and once ScrcpyTryResetVideo()
-// hits its rate limit the picture stays black until the limiter's window
-// expires — the reported "black for ~5s, then slowly brightens".
-//
-// So only escalate on a *sustained* stall: the queue must stay full
-// continuously for kStallBeforeRecoverySeconds. A counter of consecutive drops
-// cannot express that, because its meaning depends on frame rate (5 frames is
-// ~83ms at 60fps but ~200ms at 25fps). Time is the honest unit here.
-static int g_consecutiveDropCount = 0;
-static int g_totalDropCount = 0;
-static CFAbsoluteTime g_lastRecoveryTime = 0;
-// Throttle for the display-layer-failed log below. The failure status is sticky
-// until the layer is flushed and a frame is accepted again, so without this the
-// message prints once per decoded frame — tens of lines a second, straight into
-// the redirected log file.
-static CFAbsoluteTime g_lastLayerFailLogTime = 0;
-static int g_layerFailCountSinceLog = 0;
-static const CFAbsoluteTime kLayerFailLogIntervalSeconds = 5.0;
-static CFAbsoluteTime g_stallStartTime = 0;  // when the queue first went full (0 = not stalled)
-// Start of the current black-picture episode, kept across the flush+reset that
-// g_stallStartTime is rebased by, so the recovery log can report the total time
-// the user actually spent looking at a black screen.
-static CFAbsoluteTime g_episodeStartTime = 0;
-static int g_episodeDropCount = 0;   // frames dropped during this episode
-static int g_episodeResetCount = 0;  // resets attempted during this episode
-// Sustained stall required before restarting the encoder. Comfortably longer
-// than the transient bursts a scene change produces, short enough that a real
-// decode stall still recovers quickly.
-static const CFAbsoluteTime kStallBeforeRecoverySeconds = 2.0;
-static const CFAbsoluteTime kRecoveryCooldownSeconds = 1.0;  // Minimum time between recovery attempts
-
-static void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer,
-                                  AVSampleBufferDisplayLayer *displayLayer,
-                                  CFTimeInterval targetTimestamp);
+// Standard samples and their cached format are prepared by the producer.
+static void RenderSampleBufferFrame(CMSampleBufferRef sampleBuffer,
+                                    AVSampleBufferDisplayLayer *displayLayer,
+                                    CFTimeInterval targetTimestamp);
 
 static ScrcpyFramePresenter *FramePresenter(void) {
     static ScrcpyFramePresenter *presenter;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CVPixelBufferRef buffer,
+        presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CMSampleBufferRef buffer,
                 AVSampleBufferDisplayLayer *layer, CFTimeInterval target) {
-            RenderPixelBufferFrame(buffer, layer, target);
+            RenderSampleBufferFrame(buffer, layer, target);
         }];
+        presenter.recoveryHandler = ^{ ScrcpyTryResetVideo(); };
     });
     return presenter;
 }
@@ -110,15 +70,18 @@ int ScrcpyVideoFrameRate(int requested) {
 void StartScrcpyVideoPresentation(int frameRate) {
     ScrcpySetLowLatencyEventPump(true);
     BOOL useMetal = [NSUserDefaults.standardUserDefaults integerForKey:@"settings.video.rendering_mode"] == 1;
-    [FramePresenter() startWithFrameRate:frameRate useMetal:useMetal];
+    NSUserDefaults *settings = NSUserDefaults.standardUserDefaults;
+    int frames = [settings objectForKey:@"settings.video.frames_to_buffer"]
+        ? (int)[settings integerForKey:@"settings.video.frames_to_buffer"] : 1;
+    BOOL asyncDequeue = [settings objectForKey:@"settings.video.async_frame_dequeue"]
+        ? [settings boolForKey:@"settings.video.async_frame_dequeue"] : YES;
+    [FramePresenter() startWithFrameRate:frameRate useMetal:useMetal framesToBuffer:frames
+        asyncDequeue:asyncDequeue];
 }
 
 void StopScrcpyVideoPresentation(void) {
     [FramePresenter() stop];
     ScrcpySetLowLatencyEventPump(false);
-    g_consecutiveDropCount = g_totalDropCount = 0;
-    g_stallStartTime = g_episodeStartTime = g_lastRecoveryTime = 0;
-    g_episodeDropCount = g_episodeResetCount = 0;
 }
 
 void AttachScrcpyVideoPresentation(UIView *view) {
@@ -268,195 +231,15 @@ float ScrcpyAudioVolumeScale(float update_scale)
     return volume_scale;
 }
 
-static void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer,
-                                  AVSampleBufferDisplayLayer *displayLayer,
-                                  CFTimeInterval targetTimestamp) {
-    @autoreleasepool {
-        if (pixelBuffer == NULL) { return; }
-
-        if (!displayLayer) {
-            return;
-        }
-
-        // Check 1: Handle render failure status
-        AVQueuedSampleBufferRenderingStatus status = displayLayer.status;
-        if (status == AVQueuedSampleBufferRenderingStatusFailed) {
-            NSError *error = displayLayer.error;
-
-            // Log at most once per kLayerFailLogIntervalSeconds, carrying the
-            // number of occurrences suppressed since the last line so a
-            // persistent failure is still obvious from its rate.
-            CFAbsoluteTime nowFail = CFAbsoluteTimeGetCurrent();
-            g_layerFailCountSinceLog++;
-            if (nowFail - g_lastLayerFailLogTime >= kLayerFailLogIntervalSeconds) {
-                if (g_layerFailCountSinceLog > 1) {
-                    NSLog(@"⚠️ [Render] Display layer failed: %@ (x%d in the last %.0fs)",
-                          error.localizedDescription, g_layerFailCountSinceLog,
-                          kLayerFailLogIntervalSeconds);
-                } else {
-                    NSLog(@"⚠️ [Render] Display layer failed: %@",
-                          error.localizedDescription);
-                }
-                g_lastLayerFailLogTime = nowFail;
-                g_layerFailCountSinceLog = 0;
-            }
-
-            [displayLayer flush];
-
-            // The queue was just emptied, so any stall in progress is over.
-            // Clearing this matters because g_stallStartTime is process-global
-            // and survives both this failure and a later reconnect: left set, a
-            // stale start time would make the next full-queue frame look like a
-            // multi-second stall and trigger an immediate spurious reset.
-            g_consecutiveDropCount = 0;
-            g_stallStartTime = 0;
-            g_episodeStartTime = 0;
-            g_episodeDropCount = 0;
-            g_episodeResetCount = 0;
-
-            // Request video reset with cooldown to avoid spam
-            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-            if (now - g_lastRecoveryTime > kRecoveryCooldownSeconds) {
-                NSLog(@"🔄 [Render] Requesting video reset after failure");
-                ScrcpyTryResetVideo();
-                g_lastRecoveryTime = now;
-            }
-            return;  // Skip this frame, wait for recovery
-        }
-
-        // Check 2: Handle buffer full (decoder overload in high-contrast scenes)
-        //
-        // Tier 1 (the common case): just drop this frame. A scene change fills
-        // the queue for a few frames; skipping them lets it drain with no
-        // visible interruption.
-        //
-        // Tier 2 (rare): if the queue has stayed full continuously for
-        // kStallBeforeRecoverySeconds, decoding really is stuck and only an
-        // encoder restart will recover it.
-        if (!displayLayer.isReadyForMoreMediaData) {
-            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-
-            g_consecutiveDropCount++;
-            g_totalDropCount++;
-
-            // Mark the start of this stall. Cleared as soon as a frame is
-            // accepted, so the duration below always measures one uninterrupted
-            // stall rather than an accumulation of unrelated bursts.
-            if (g_stallStartTime == 0) {
-                g_stallStartTime = now;
-            }
-            // An episode spans the whole black period including any resets, so
-            // it starts with the first stall and is only cleared on recovery.
-            if (g_episodeStartTime == 0) {
-                g_episodeStartTime = now;
-                g_episodeDropCount = 0;
-                g_episodeResetCount = 0;
-            }
-            g_episodeDropCount++;
-            CFAbsoluteTime stalledFor = now - g_stallStartTime;
-
-            // Tier 1 diagnostics. Throttled to every 10th consecutive drop:
-            // this runs on the presentation worker at frame rate, so an unthrottled
-            // NSLog here would both flood the log and cost real time in the
-            // frame path. The first drop is always logged so the start of an
-            // episode is visible.
-            if (g_consecutiveDropCount == 1 || g_consecutiveDropCount % 10 == 0) {
-                NSLog(@"⚠️ [StallRecovery] Tier1 drop: consecutive=%d episode=%d "
-                      @"total=%d stalled=%.2fs (threshold %.1fs)",
-                      g_consecutiveDropCount, g_episodeDropCount, g_totalDropCount,
-                      stalledFor, kStallBeforeRecoverySeconds);
-            }
-
-            // Only a sustained stall justifies restarting the encoder.
-            if (stalledFor >= kStallBeforeRecoverySeconds &&
-                now - g_lastRecoveryTime > kRecoveryCooldownSeconds) {
-                // Ask the limiter up-front whether this reset can actually go
-                // through, so a refusal is visible instead of silent. This only
-                // reads the limiter state; ScrcpyTryResetVideo() below still
-                // makes the real decision.
-                const char *blockReason = "ready";
-                NSTimeInterval blockedFor = ScrcpyResetVideoBlockedFor(&blockReason);
-
-                g_episodeResetCount++;
-                NSLog(@"🔄 [StallRecovery] Tier2 escalate: stalled=%.2fs "
-                      @"episode=%.2fs drops=%d resets=%d -> flush + reset",
-                      stalledFor, now - g_episodeStartTime, g_episodeDropCount,
-                      g_episodeResetCount);
-
-                // If the limiter will refuse this reset, say so and say for how
-                // long: that wait is exactly how much longer the picture stays
-                // black, which is the number to compare against the reported
-                // "~5 seconds".
-                if (blockedFor > 0) {
-                    NSLog(@"⏳ [StallRecovery] Reset blocked by %s, ~%.1fs to wait "
-                          @"— picture stays black until then",
-                          blockReason, blockedFor);
-                }
-
-                [displayLayer flush];
-                ScrcpyTryResetVideo();
-                g_lastRecoveryTime = now;
-                g_consecutiveDropCount = 0;
-                // Restart the stall clock so the next escalation is judged from
-                // this recovery, not from the original stall — otherwise every
-                // later frame would still read as "stalled >= threshold" and
-                // fire a reset on each cooldown expiry.
-                g_stallStartTime = now;
-            }
-            return;  // Skip this frame
-        }
-
-        // The queue accepted a frame: this stall (if any) is over.
-        if (g_episodeStartTime != 0) {
-            NSLog(@"✅ [StallRecovery] recovered after %.2fs "
-                  @"(dropped %d frames, %d reset(s))",
-                  CFAbsoluteTimeGetCurrent() - g_episodeStartTime,
-                  g_episodeDropCount, g_episodeResetCount);
-            g_episodeStartTime = 0;
-            g_episodeDropCount = 0;
-            g_episodeResetCount = 0;
-        }
-        g_consecutiveDropCount = 0;
-        g_stallStartTime = 0;
-
-        // Create sample buffer for rendering
-        // Convert the display deadline to the layer's host-clock timebase.
-        // Late jobs use now, never an old network PTS or a growing FIFO.
-        CMTime presentationTime = CMTimeAdd(CMClockGetTime(CMClockGetHostTimeClock()),
-            CMTimeMakeWithSeconds(MAX(0, targetTimestamp - CACurrentMediaTime()), NSEC_PER_SEC));
-        CMSampleTimingInfo timing = {kCMTimeInvalid, presentationTime, kCMTimeInvalid};
-        CMVideoFormatDescriptionRef videoInfo = NULL;
-        OSStatus result = CMVideoFormatDescriptionCreateForImageBuffer(NULL, pixelBuffer, &videoInfo);
-
-        if (result != noErr || videoInfo == NULL) {
-            NSLog(@"❌ [Render] Failed to create video format description: %d", (int)result);
-            return;
-        }
-
-        CMSampleBufferRef sampleBuffer = NULL;
-        result = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, videoInfo, &timing, &sampleBuffer);
-
-        if (sampleBuffer == NULL) {
-            CFRelease(videoInfo);
-            return;
-        }
-
-        // Render the sample buffer
-        if (@available(iOS 17.0, *)) {
-            [displayLayer.sampleBufferRenderer enqueueSampleBuffer:sampleBuffer];
-        } else {
-            [displayLayer enqueueSampleBuffer:sampleBuffer];
-        }
-
-        // Post-render check: handle any failure that occurred during enqueue
-        if (displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
-            NSLog(@"⚠️ [Render] Render failed after enqueue, flushing");
-            [displayLayer flush];
-        }
-
-        CFRelease(videoInfo);
-        CFRelease(sampleBuffer);
-    }
+static void RenderSampleBufferFrame(CMSampleBufferRef sampleBuffer,
+                                    AVSampleBufferDisplayLayer *displayLayer,
+                                    CFTimeInterval targetTimestamp) {
+    // Match VoidLink renderFrame:atTime:. No custom timebase, extra frame
+    // delay, per-frame format allocation or second readiness/drop policy.
+    CMSampleBufferSetOutputPresentationTimeStamp(sampleBuffer,
+        CMTimeMakeWithSeconds(targetTimestamp, NSEC_PER_SEC));
+    if (GetUpdateApplicationBackgroundState(false)) { [displayLayer flush]; }
+    else { [displayLayer enqueueSampleBuffer:sampleBuffer]; }
 }
 
 AVFrame * ScrcpyHandleFrame(AVFrame *frame) {
@@ -473,7 +256,8 @@ AVFrame * ScrcpyHandleFrame(AVFrame *frame) {
     if (ScrcpyEnableHardwareDecoding() == ScrcpyHardwareDecodingLayerRender) {
         CheckAndNotifyOrientationChange((int)CVPixelBufferGetWidth(pixelBuffer),
                                        (int)CVPixelBufferGetHeight(pixelBuffer));
-        [FramePresenter() submitPixelBuffer:pixelBuffer];
+        [FramePresenter() submitPixelBuffer:pixelBuffer ptsUS:frame->pts
+            keyframe:(frame->flags & AV_FRAME_FLAG_KEY) != 0];
         return frame;
     }
     

@@ -3,41 +3,46 @@
 #import "ScrcpyFramePresenter.h"
 #import <QuartzCore/CAMetalLayer.h>
 
+// Exercise the production tick's Standard branch with controlled deadlines,
+// then let the real CADisplayLink deliver a final frame in the simulator.
+@interface ScrcpyFramePresenter (TestClock)
+- (void)renderStandardAtTarget:(CFTimeInterval)target;
+@end
 static _Atomic(int) created, released, delivered, lastSequence;
-static dispatch_semaphore_t slowRenderer;
 static NSString *resultPath;
-
 static void finish(NSString *failure) {
     NSDictionary *result = @{ @"passed": @(failure == nil), @"failure": failure ?: @"",
         @"created": @(atomic_load(&created)), @"released": @(atomic_load(&released)),
-        @"delivered": @(atomic_load(&delivered)) };
+        @"delivered": @(atomic_load(&delivered)), @"standardQueueBuffering": @YES };
     [[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:NULL]
         writeToFile:resultPath atomically:YES];
     exit(failure ? 1 : 0);
 }
 #define CHECK(condition) do { if (!(condition)) { finish(@#condition); } } while (0)
-
 static void releaseBytes(void *context, const void *baseAddress) {
     free((void *)baseAddress);
     atomic_fetch_add(&released, 1);
 }
-
 static CVPixelBufferRef makeFrame(int sequence) {
     CVPixelBufferRef frame = NULL;
     int *bytes = calloc(16, 1);
     bytes[0] = sequence;
-    OSStatus status = CVPixelBufferCreateWithBytes(kCFAllocatorDefault, 2, 2,
-        kCVPixelFormatType_32ARGB, bytes, 8, releaseBytes, NULL, NULL, &frame);
-    CHECK(status == noErr && frame);
+    CHECK(CVPixelBufferCreateWithBytes(kCFAllocatorDefault, 2, 2,
+        kCVPixelFormatType_32ARGB, bytes, 8, releaseBytes, NULL, NULL, &frame) == noErr);
     atomic_fetch_add(&created, 1);
     return frame;
 }
-
+static void submit(ScrcpyFramePresenter *presenter, int sequence) {
+    @autoreleasepool {
+        CVPixelBufferRef frame = makeFrame(sequence);
+        [presenter submitPixelBuffer:frame ptsUS:sequence keyframe:NO];
+        CVPixelBufferRelease(frame);
+    }
+}
 @interface PresenterTestDelegate : UIResponder <UIApplicationDelegate>
 @property(strong) UIWindow *window;
 @property(strong) ScrcpyFramePresenter *presenter;
 @end
-
 @implementation PresenterTestDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     resultPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
@@ -45,135 +50,94 @@ static CVPixelBufferRef makeFrame(int sequence) {
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [UIViewController new];
     [self.window makeKeyAndVisible];
-    slowRenderer = dispatch_semaphore_create(0);
-    self.presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CVPixelBufferRef frame,
+    self.presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CMSampleBufferRef sample,
             AVSampleBufferDisplayLayer *layer, CFTimeInterval deadline) {
-        CHECK(!NSThread.isMainThread);
-        CHECK(layer && deadline > 0);
+        CHECK(NSThread.isMainThread);
+        CHECK(layer && layer.controlTimebase == NULL && deadline > 0);
+        CHECK(fabs(CMTimeGetSeconds(CMSampleBufferGetOutputPresentationTimeStamp(sample)) - deadline) < 0.000001);
+        CVPixelBufferRef frame = CMSampleBufferGetImageBuffer(sample);
         CVPixelBufferLockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
-        int sequence = *(int *)CVPixelBufferGetBaseAddress(frame);
-        atomic_store(&lastSequence, sequence);
+        atomic_store(&lastSequence, *(int *)CVPixelBufferGetBaseAddress(frame));
         CVPixelBufferUnlockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
-        if (sequence == 40000) {
-            CHECK(dispatch_semaphore_wait(slowRenderer,
-                dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0);
-        }
         atomic_fetch_add(&delivered, 1);
     }];
-    [self.presenter startWithFrameRate:120];
-    // No attached clock yet: a stalled consumer must retain only one frame.
-    for (int i = 0; i < 10000; ++i) {
-        CVPixelBufferRef frame = makeFrame(i);
-        [self.presenter submitPixelBuffer:frame];
-        CVPixelBufferRelease(frame);
-    }
-    CHECK(atomic_load(&released) == 9999);
+    @autoreleasepool { [self exerciseStandard]; }
+    // Old asynchronous completions may still own a buffer until main resumes.
+    // The final check after reconnect verifies that all of them are released.
+    [self.presenter startWithFrameRate:120 useMetal:NO framesToBuffer:1 asyncDequeue:YES];
     [self.presenter attachToView:self.window.rootViewController.view hardwareDecoding:YES];
-    [self waitForFirstFrame:100];
+    submit(self.presenter, 90000);
+    [self waitForLiveClock:100];
     return YES;
 }
-
-- (void)waitForFirstFrame:(int)attempts {
+- (void)exerciseStandard {
+    UIView *view = self.window.rootViewController.view;
+    [self.presenter startWithFrameRate:120 useMetal:NO framesToBuffer:1 asyncDequeue:NO];
+    for (int i = 0; i < 10000; ++i) { submit(self.presenter, i); }
+    CHECK(atomic_load(&released) == 9999);
+    [self.presenter attachToView:view hardwareDecoding:YES];
+    [self.presenter renderStandardAtTarget:CACurrentMediaTime()];
+    CHECK(atomic_load(&lastSequence) == 9998); // Alternating drops, not latest-only.
+    [self.presenter setPaused:YES];
+    for (int i = 0; i < 1000; ++i) { submit(self.presenter, i); }
+    [self.presenter stop];
+    // Buffer=3 waits for its initial fill, then consumes FIFO.
+    [self.presenter startWithFrameRate:120 useMetal:NO framesToBuffer:3 asyncDequeue:NO];
+    [self.presenter attachToView:view hardwareDecoding:YES];
+    int before = atomic_load(&delivered);
+    submit(self.presenter, 20000); submit(self.presenter, 20001);
+    [self.presenter renderStandardAtTarget:CACurrentMediaTime()];
+    CHECK(atomic_load(&delivered) == before);
+    submit(self.presenter, 20002);
+    for (int i = 20000; i < 20003; ++i) {
+        [self.presenter renderStandardAtTarget:CACurrentMediaTime()];
+        CHECK(atomic_load(&lastSequence) == i);
+    }
+    // Empty queue still accepts a frame arriving before this display deadline.
+    [self.presenter startWithFrameRate:120 useMetal:NO framesToBuffer:0 asyncDequeue:NO];
+    [self.presenter attachToView:view hardwareDecoding:YES];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        submit(self.presenter, 30000);
+    });
+    [self.presenter renderStandardAtTarget:CACurrentMediaTime() + 0.5];
+    CHECK(atomic_load(&lastSequence) == 30000);
+    // Queue an async completion, reconnect before main can execute it, and
+    // verify its generation cannot deliver an old-session frame.
+    [self.presenter startWithFrameRate:120 useMetal:NO framesToBuffer:0 asyncDequeue:YES];
+    [self.presenter attachToView:view hardwareDecoding:YES];
+    submit(self.presenter, 40000);
+    [self.presenter renderStandardAtTarget:CACurrentMediaTime()];
+    [self.presenter stop];
+    [self.presenter startWithFrameRate:120 useMetal:YES];
+    [self.presenter attachToView:view hardwareDecoding:YES];
+    CHECK([self countLayers:CAMetalLayer.class inView:view] == 1);
+    CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 0);
+    // Metal still bounds stalled presentation to its latest pending buffer.
+    for (int i = 50000; i < 60000; ++i) { submit(self.presenter, i); }
+    [self.presenter startWithFrameRate:120 useMetal:NO];
+    [self.presenter attachToView:view hardwareDecoding:YES];
+    CHECK([self countLayers:CAMetalLayer.class inView:view] == 0);
+    CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 1);
+    [self.presenter stop];
+}
+- (void)waitForLiveClock:(int)attempts {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (!atomic_load(&delivered) && attempts > 0) {
-            [self waitForFirstFrame:attempts - 1];
-            return;
-        }
-        CHECK(atomic_load(&delivered) == 1);
-        CHECK(atomic_load(&lastSequence) == 9999);
-        [self.presenter setPaused:YES];
-        for (int i = 0; i < 1000; ++i) {
-            CVPixelBufferRef frame = makeFrame(i);
-            [self.presenter submitPixelBuffer:frame];
-            CVPixelBufferRelease(frame);
-        }
-        CHECK(atomic_load(&created) == atomic_load(&released));
-        CHECK(atomic_load(&delivered) == 1);
-        [self.presenter setPaused:NO];
-        CVPixelBufferRef obsolete = makeFrame(20000);
-        [self.presenter submitPixelBuffer:obsolete];
-        CVPixelBufferRelease(obsolete);
+        if (atomic_load(&lastSequence) != 90000 && attempts > 0) { [self waitForLiveClock:attempts - 1]; return; }
+        CHECK(atomic_load(&lastSequence) == 90000);
         [self.presenter stop];
-        CHECK(atomic_load(&created) == atomic_load(&released));
-        [self.presenter startWithFrameRate:60];
-        [self.presenter attachToView:self.window.rootViewController.view hardwareDecoding:YES];
-        CVPixelBufferRef current = makeFrame(30000);
-        [self.presenter submitPixelBuffer:current];
-        CVPixelBufferRelease(current);
-        [self waitForReconnect:100];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            CHECK(atomic_load(&created) == atomic_load(&released));
+            CHECK(atomic_load(&lastSequence) == 90000);
+            finish(nil);
+        });
     });
 }
-
-- (void)waitForReconnect:(int)attempts {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (atomic_load(&lastSequence) != 30000 && attempts > 0) {
-            [self waitForReconnect:attempts - 1];
-            return;
-        }
-        CHECK(atomic_load(&lastSequence) == 30000);
-        [self.presenter setPaused:YES];
-        [self.presenter setPaused:NO];
-        CVPixelBufferRef slow = makeFrame(40000);
-        [self.presenter submitPixelBuffer:slow];
-        CVPixelBufferRelease(slow);
-        [self waitForSlowRenderer:100];
-    });
-}
-
-- (void)waitForSlowRenderer:(int)attempts {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (atomic_load(&lastSequence) != 40000 && attempts > 0) {
-            [self waitForSlowRenderer:attempts - 1];
-            return;
-        }
-        CHECK(atomic_load(&lastSequence) == 40000);
-        // A worker is stalled while the producer continues. UIKit must stay
-        // responsive and only the in-flight frame plus the newest may survive.
-        for (int i = 40001; i <= 50000; ++i) {
-            CVPixelBufferRef frame = makeFrame(i);
-            [self.presenter submitPixelBuffer:frame];
-            CVPixelBufferRelease(frame);
-        }
-        CHECK(atomic_load(&created) - atomic_load(&released) == 2);
-        dispatch_semaphore_signal(slowRenderer);
-        [self waitForLatestAfterStall:100];
-    });
-}
-
-- (void)waitForLatestAfterStall:(int)attempts {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (atomic_load(&lastSequence) != 50000 && attempts > 0) {
-            [self waitForLatestAfterStall:attempts - 1];
-            return;
-        }
-        CHECK(atomic_load(&lastSequence) == 50000);
-        [self.presenter stop];
-        CHECK(atomic_load(&created) == atomic_load(&released));
-        // The saved mode is applied at session start. Only its own layer may
-        // exist; switching modes must remove the previous session's backend.
-        UIView *view = self.window.rootViewController.view;
-        [self.presenter startWithFrameRate:120 useMetal:YES];
-        [self.presenter attachToView:view hardwareDecoding:YES];
-        CHECK([self countLayers:CAMetalLayer.class inView:view] == 1);
-        CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 0);
-        [self.presenter startWithFrameRate:120 useMetal:NO];
-        [self.presenter attachToView:view hardwareDecoding:YES];
-        CHECK([self countLayers:CAMetalLayer.class inView:view] == 0);
-        CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 1);
-        [self.presenter stop];
-        finish(nil);
-    });
-}
-
 - (NSUInteger)countLayers:(Class)type inView:(UIView *)view {
     NSUInteger count = 0;
-    for (CALayer *layer in view.layer.sublayers) {
-        if ([layer isKindOfClass:type]) { ++count; }
-    }
+    for (CALayer *layer in view.layer.sublayers) { if ([layer isKindOfClass:type]) { ++count; } }
     return count;
 }
 @end
-
 int main(int argc, char **argv) {
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(PresenterTestDelegate.class)); }
 }

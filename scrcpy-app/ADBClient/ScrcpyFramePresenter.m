@@ -1,6 +1,7 @@
 #import "ScrcpyFramePresenter.h"
 #import "frame-pacing.h"
 #import "ScrcpyMetalRenderer.h"
+#import "ScrcpyFrameQueue.h"
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
 
@@ -8,7 +9,11 @@
     os_unfair_lock _lock;
     CVPixelBufferRef _pending;
     dispatch_queue_t _renderQueue;
-    void (^_renderer)(CVPixelBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval);
+    void (^_renderer)(CMSampleBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval);
+    ScrcpyFrameQueue *_frames;
+    ScrcpySampleBufferFactory *_samples;
+    int _framesToBuffer;
+    BOOL _asyncDequeue, _needRequeuing;
     CADisplayLink *_displayLink;
     AVSampleBufferDisplayLayer *_layer;
     __weak UIView *_view;
@@ -20,10 +25,12 @@
     ScrcpyMetalRenderer *_metal;
 }
 
-- (instancetype)initWithRenderer:(void (^)(CVPixelBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval))renderer {
+- (instancetype)initWithRenderer:(void (^)(CMSampleBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval))renderer {
     if ((self = [super init])) {
         _lock = OS_UNFAIR_LOCK_INIT;
         _renderer = [renderer copy];
+        _frames = [ScrcpyFrameQueue new];
+        _samples = [ScrcpySampleBufferFactory new];
         _renderQueue = dispatch_queue_create("scrcpy.video.presentation",
             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
     }
@@ -35,11 +42,20 @@
 }
 
 - (void)startWithFrameRate:(int)frameRate useMetal:(BOOL)useMetal {
+    [self startWithFrameRate:frameRate useMetal:useMetal framesToBuffer:1 asyncDequeue:YES];
+}
+
+- (void)startWithFrameRate:(int)frameRate useMetal:(BOOL)useMetal framesToBuffer:(int)frames asyncDequeue:(BOOL)asyncDequeue {
     NSAssert(NSThread.isMainThread, @"Presenter lifecycle must run on main");
     [self stop];
-    _useMetal = useMetal;
     _requestedFrameRate = frameRate;
     os_unfair_lock_lock(&_lock);
+    _useMetal = useMetal;
+    _framesToBuffer = MAX(0, MIN(5, frames));
+    _asyncDequeue = asyncDequeue;
+    _needRequeuing = _framesToBuffer > 0;
+    _frames = [ScrcpyFrameQueue new];
+    [_frames startWithFramesToBuffer:_framesToBuffer];
     _running = YES;
     _paused = NO;
     _decoded = _replaced = _renderCalls = 0;
@@ -70,16 +86,9 @@
         _layer = [AVSampleBufferDisplayLayer layer];
         _layer.videoGravity = AVLayerVideoGravityResizeAspect;
         _layer.backgroundColor = UIColor.blackColor.CGColor;
-        CMTimebaseRef timebase = NULL;
-        CMClockRef clock = CMClockGetHostTimeClock();
-        if (CMTimebaseCreateWithSourceClock(kCFAllocatorDefault, clock, &timebase) == noErr) {
-            CMTimebaseSetTime(timebase, CMClockGetTime(clock));
-            CMTimebaseSetRate(timebase, 1.0);
-            _layer.controlTimebase = timebase;
-            CFRelease(timebase);
-        }
+        // VoidLink's Standard optimization: leave controlTimebase unset.
         [view.layer addSublayer:_layer];
-        NSLog(@"[FramePacing] renderer=Standard (AVSampleBufferDisplayLayer)");
+        NSLog(@"[FramePacing] renderer=Standard queueBuffering=%d asyncDequeue=%d timebase=off", _framesToBuffer, _asyncDequeue);
     }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -93,8 +102,8 @@
 
     if (!_displayLink) {
         _displayLink = [view.window.screen displayLinkWithTarget:self selector:@selector(displayTick:)];
-        // Keep ticking during UIKit's touch/gesture tracking mode as well.
-        [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        // Match the reference's Standard/default and Metal/common modes.
+        [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:_useMetal ? NSRunLoopCommonModes : NSDefaultRunLoopMode];
     }
     int fps = sc_display_frame_rate(_requestedFrameRate, (int)view.window.screen.maximumFramesPerSecond);
     if (@available(iOS 15.0, *)) {
@@ -106,10 +115,23 @@
 }
 
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    [self submitPixelBuffer:pixelBuffer ptsUS:0 keyframe:NO];
+}
+
+- (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer ptsUS:(int64_t)pts keyframe:(BOOL)keyframe {
     if (!pixelBuffer) { return; }
     CVPixelBufferRetain(pixelBuffer);
     os_unfair_lock_lock(&_lock);
     if (!_running || _paused) {
+        os_unfair_lock_unlock(&_lock);
+        CVPixelBufferRelease(pixelBuffer);
+        return;
+    }
+    if (!_useMetal) {
+        // Prepare the sample on the producer, as VoidLink does. The format is
+        // cached; the display callback only changes output PTS and enqueues.
+        ScrcpyQueuedFrame *frame = [_samples frameWithPixelBuffer:pixelBuffer ptsUS:pts keyframe:keyframe];
+        if (frame) { ++_decoded; _replaced += [_frames enqueue:frame]; }
         os_unfair_lock_unlock(&_lock);
         CVPixelBufferRelease(pixelBuffer);
         return;
@@ -132,11 +154,17 @@
         uint64_t decoded = _decoded, replaced = _replaced, rendered = _renderCalls;
         _decoded = _replaced = _renderCalls = 0;
         os_unfair_lock_unlock(&_lock);
-        NSLog(@"[FramePacing] callbacks=%.1f/s decoded=%.1f/s renderCalls=%.1f/s replaced=%llu pending<=1",
-              _ticks / seconds, decoded / seconds, rendered / seconds, (unsigned long long)replaced);
+        NSLog(@"[FramePacing] callbacks=%.1f/s decoded=%.1f/s renderCalls=%.1f/s dropped=%llu queued=%lu mode=%@",
+              _ticks / seconds, decoded / seconds, rendered / seconds, (unsigned long long)replaced,
+              (unsigned long)(_useMetal ? (_pending != NULL) : _frames.count), _useMetal ? @"Metal" : @"Standard");
         _ticks = 0;
         _metricsStart = now;
         os_unfair_lock_lock(&_lock);
+    }
+    if (!_useMetal) {
+        os_unfair_lock_unlock(&_lock);
+        [self renderStandardAtTarget:link.targetTimestamp];
+        return;
     }
     if (!_running || _paused || !_pending || _workScheduled || (!layer && !_metal)) {
         os_unfair_lock_unlock(&_lock);
@@ -160,8 +188,7 @@
             if (frame) {
                 // The session's explicit setting selects exactly one backend.
                 // Busy GPU work drops presentation, never switches renderers.
-                if (self->_useMetal) { [self->_metal renderPixelBuffer:frame targetTime:target]; }
-                else { self->_renderer(frame, layer, target); }
+                [self->_metal renderPixelBuffer:frame targetTime:target];
                 CVPixelBufferRelease(frame);
             }
             os_unfair_lock_lock(&self->_lock);
@@ -172,6 +199,42 @@
     });
 }
 
+- (void)presentStandardFrame:(ScrcpyQueuedFrame *)frame target:(CFTimeInterval)target generation:(uint64_t)generation {
+    NSAssert(NSThread.isMainThread, @"Standard presentation belongs to the display callback");
+    if (!frame || !_running || _paused || _generation != generation || !_layer) { return; }
+    CMSampleBufferSetOutputPresentationTimeStamp(frame.sampleBuffer, CMTimeMakeWithSeconds(target, NSEC_PER_SEC));
+    _renderer(frame.sampleBuffer, _layer, target);
+    os_unfair_lock_lock(&_lock);
+    ++_renderCalls;
+    os_unfair_lock_unlock(&_lock);
+}
+
+- (void)renderStandardAtTarget:(CFTimeInterval)target {
+    if (!_running || _paused || !_layer) { return; }
+    if (_layer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+        [_layer flushAndRemoveImage];
+        if (self.recoveryHandler) { self.recoveryHandler(); }
+    }
+    if (_needRequeuing && _frames.count <= MAX(_framesToBuffer - 1, 0)) { return; }
+    _needRequeuing = NO;
+    uint64_t generation = _generation;
+    CFTimeInterval waitFor = target - CACurrentMediaTime();
+    if (_asyncDequeue) {
+        // Like VoidLink's dequeueWithTimeout:completion:, wait on a high-QoS
+        // worker and deliver on main. Lifecycle generation rejects old results.
+        ScrcpyFrameQueue *queue = _frames;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            ScrcpyQueuedFrame *frame = [queue dequeueWithTimeout:waitFor];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self presentStandardFrame:frame target:target generation:generation];
+            });
+        });
+    } else {
+        ScrcpyQueuedFrame *frame = [_frames dequeueWithTimeout:waitFor];
+        [self presentStandardFrame:frame target:target generation:generation];
+    }
+}
+
 - (void)setPaused:(BOOL)paused {
     NSAssert(NSThread.isMainThread, @"Presenter lifecycle must run on main");
     os_unfair_lock_lock(&_lock);
@@ -180,6 +243,13 @@
     _decoded = _replaced = _renderCalls = 0;
     CVPixelBufferRef old = _pending;
     _pending = NULL;
+    [_frames stop];
+    if (!paused) {
+        _frames = [ScrcpyFrameQueue new];
+        [_frames startWithFramesToBuffer:_framesToBuffer];
+    }
+    [_samples reset];
+    _needRequeuing = _framesToBuffer > 0;
     os_unfair_lock_unlock(&_lock);
     if (old) { CVPixelBufferRelease(old); }
     _displayLink.paused = paused;
@@ -198,6 +268,8 @@
     ++_generation;
     CVPixelBufferRef old = _pending;
     _pending = NULL;
+    [_frames stop];
+    [_samples reset];
     os_unfair_lock_unlock(&_lock);
     if (old) { CVPixelBufferRelease(old); }
     dispatch_sync(_renderQueue, ^{ [self->_layer flushAndRemoveImage]; [self->_metal drain]; });
