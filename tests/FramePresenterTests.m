@@ -79,6 +79,7 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
 @property(nonatomic, strong) dispatch_semaphore_t capacityEntered;
 @property(nonatomic, strong) dispatch_semaphore_t capacityAvailable;
 @property(nonatomic) BOOL holdCapacity;
+@property(nonatomic) BOOL renderToGPU;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *sequences;
 @property(nonatomic, copy) void (^onDrain)(void);
 @end
@@ -106,6 +107,15 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
 - (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer drawable:(id<CAMetalDrawable>)drawable {
     CHECK(!NSThread.isMainThread && drawable != nil);
     CHECK(NSThread.currentThread.qualityOfService == NSQualityOfServiceUserInteractive);
+    if (_renderToGPU) {
+        // Exercise the actual CAMetalDisplayLink drawable through the production
+        // shader, present and GPU completion path, not just the clock callback.
+        ScrcpyMetalResult result = [super renderAcquiredPixelBuffer:buffer drawable:drawable];
+        CHECK(result == ScrcpyMetalPresented);
+        [_sequences addObject:@90001];
+        dispatch_semaphore_signal(_completed);
+        return result;
+    }
     CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
     int sequence = *(int *)CVPixelBufferGetBaseAddress(buffer);
     CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
@@ -131,6 +141,7 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
 - (ScrcpyMetalRenderer *)makeMetalRenderer {
     self.testMetal = [TestMetalRenderer new];
     self.testMetal.holdCapacity = !self.useSystemClock;
+    self.testMetal.renderToGPU = self.useSystemClock;
     return self.testMetal;
 }
 - (CAMetalDisplayLink *)makeMetalDisplayLink:(CAMetalLayer *)layer {
@@ -272,7 +283,20 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
         ((TestPresenter *)self.presenter).useSystemClock = YES;
         [self.presenter startWithFrameRate:120 useMetal:YES];
         [self.presenter attachToView:self.window.rootViewController.view hardwareDecoding:YES];
-        submit(self.presenter, 90001);
+        CVPixelBufferRef frame = NULL;
+        NSDictionary *attributes = @{(__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{},
+            (__bridge NSString *)kCVPixelBufferMetalCompatibilityKey: @YES};
+        CHECK(CVPixelBufferCreate(kCFAllocatorDefault, 128, 96,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            (__bridge CFDictionaryRef)attributes, &frame) == kCVReturnSuccess);
+        CVPixelBufferLockBaseAddress(frame, 0);
+        for (size_t plane = 0; plane < 2; ++plane) {
+            memset(CVPixelBufferGetBaseAddressOfPlane(frame, plane), plane ? 128 : 16,
+                CVPixelBufferGetBytesPerRowOfPlane(frame, plane) * CVPixelBufferGetHeightOfPlane(frame, plane));
+        }
+        CVPixelBufferUnlockBaseAddress(frame, 0);
+        [self.presenter submitPixelBuffer:frame];
+        CVPixelBufferRelease(frame);
         [self waitForLiveMetalClock:100];
     });
 }
