@@ -245,6 +245,10 @@
     NSAssert(NSThread.isMainThread, @"Presenter lifecycle must run on main");
     os_unfair_lock_lock(&_lock);
     _paused = paused;
+    // A producer may submit immediately on resume. Do not let it start a
+    // continuously-fed Metal worker ahead of the synchronous drain below.
+    BOOL attached = _attached;
+    _attached = NO;
     ++_generation;
     _decoded = _replaced = _renderCalls = _metalBusy = _metalErrors = 0;
     [_frames stop];
@@ -259,6 +263,7 @@
     // No synchronous dispatch to main occurs on the presentation worker.
     dispatch_sync(_renderQueue, ^{ [self->_layer flush]; [self->_metal drain]; });
     os_unfair_lock_lock(&_lock);
+    _attached = attached;
     [self scheduleMetalLocked];
     os_unfair_lock_unlock(&_lock);
     _ticks = 0;

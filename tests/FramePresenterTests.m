@@ -50,6 +50,7 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
 @property(nonatomic, strong) dispatch_semaphore_t releaseFirst;
 @property(nonatomic, strong) dispatch_semaphore_t completed;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *sequences;
+@property(nonatomic, copy) void (^onDrain)(void);
 @end
 @implementation TestMetalRenderer
 - (instancetype)init {
@@ -73,6 +74,10 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     [_sequences addObject:@(sequence)];
     dispatch_semaphore_signal(_completed);
     return sequence == 50001 ? ScrcpyMetalBusy : sequence == 50002 ? ScrcpyMetalUnsupported : ScrcpyMetalPresented;
+}
+- (void)drain {
+    if (self.onDrain) { self.onDrain(); }
+    [super drain];
 }
 @end
 @interface TestPresenter : ScrcpyFramePresenter
@@ -178,8 +183,16 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     [self.presenter setPaused:YES];
     submit(self.presenter, 59999);
     CHECK(metal.sequences.count == 4);
+    __weak ScrcpyFramePresenter *resuming = self.presenter;
+    metal.onDrain = ^{
+        CHECK(![[resuming valueForKey:@"attached"] boolValue]);
+        // A decoded frame arriving during the resume drain is retained, but
+        // cannot start a worker ahead of the lifecycle barrier.
+        submit(resuming, 60000);
+        CHECK(![[resuming valueForKey:@"workScheduled"] boolValue]);
+    };
     [self.presenter setPaused:NO];
-    submit(self.presenter, 60000);
+    metal.onDrain = nil;
     CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     dispatch_sync([self.presenter valueForKey:@"renderQueue"], ^{});
     CHECK([metal.sequences.lastObject intValue] == 60000);
