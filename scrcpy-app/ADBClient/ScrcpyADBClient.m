@@ -18,6 +18,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import "ScrcpyCommon.h"
 #import "ScrcpyRuntime.h"
+#import <os/lock.h>
 
 // C function implementation
 // SDL3: SDL_KeyboardEvent.keysym was flattened into the event (key /
@@ -60,6 +61,7 @@ void ScrcpySendKeycodeEvent(SDL_Scancode scancode, SDL_Keycode keycode, SDL_Keym
 static NSTimeInterval g_lastResetTime = 0;
 static int g_resetCountInWindow = 0;
 static NSTimeInterval g_resetWindowStartTime = 0;
+static os_unfair_lock g_resetLock = OS_UNFAIR_LOCK_INIT;
 
 static const NSTimeInterval kResetCooldownSeconds = 3.0;
 static const NSTimeInterval kResetWindowSeconds = 10.0;
@@ -68,7 +70,7 @@ static const int kMaxResetsPerWindow = 3;
 // How many seconds until ScrcpyTryResetVideo() would actually perform a reset,
 // and why it is currently blocked. Returns 0 when a reset would go through now.
 // Diagnostics only — it does not mutate the limiter state.
-NSTimeInterval ScrcpyResetVideoBlockedFor(const char **reason) {
+static NSTimeInterval ScrcpyResetVideoBlockedForUnlocked(const char **reason) {
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
 
     NSTimeInterval cooldownLeft = kResetCooldownSeconds - (now - g_lastResetTime);
@@ -94,7 +96,16 @@ NSTimeInterval ScrcpyResetVideoBlockedFor(const char **reason) {
     return 0;
 }
 
+NSTimeInterval ScrcpyResetVideoBlockedFor(const char **reason) {
+    os_unfair_lock_lock(&g_resetLock);
+    NSTimeInterval remaining = ScrcpyResetVideoBlockedForUnlocked(reason);
+    os_unfair_lock_unlock(&g_resetLock);
+    return remaining;
+}
+
 void ScrcpyTryResetVideo(void) {
+    // Decoder recovery and presentation recovery now run on separate workers.
+    os_unfair_lock_lock(&g_resetLock);
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
 
     // Basic cooldown between resets.
@@ -106,6 +117,7 @@ void ScrcpyTryResetVideo(void) {
     // room than the old 1s: long enough for a restart to actually land, short
     // enough that a genuinely stuck stream still recovers promptly.
     if (now - g_lastResetTime < kResetCooldownSeconds) {
+        os_unfair_lock_unlock(&g_resetLock);
         return;
     }
 
@@ -127,16 +139,19 @@ void ScrcpyTryResetVideo(void) {
                   kResetWindowSeconds - (now - g_resetWindowStartTime));
             lastSkipLogTime = now;
         }
+        os_unfair_lock_unlock(&g_resetLock);
         return;
     }
 
     // Perform the reset
-    ScrcpySendKeycodeEvent(SDL_SCANCODE_R, SDLK_R, SDL_KMOD_LCTRL | SDL_KMOD_SHIFT);
     g_resetCountInWindow++;
     g_lastResetTime = now;
+    int count = g_resetCountInWindow;
+    os_unfair_lock_unlock(&g_resetLock);
+    ScrcpySendKeycodeEvent(SDL_SCANCODE_R, SDLK_R, SDL_KMOD_LCTRL | SDL_KMOD_SHIFT);
 
     NSLog(@"🔄 [StallRecovery] Video reset sent (%d/%d in this %.0fs window)",
-          g_resetCountInWindow, kMaxResetsPerWindow, kResetWindowSeconds);
+          count, kMaxResetsPerWindow, kResetWindowSeconds);
 }
 
 @interface ScrcpyADBClient () <ScrcpyClientProtocol>
@@ -488,6 +503,12 @@ void ScrcpyTryResetVideo(void) {
         }
     }
     
+    // Normalize after custom flags too, so restored sessions and overrides
+    // follow the same screen limit as the local presentation clock.
+    int frameRate = ScrcpyVideoFrameRate([args[@"--max-fps"] intValue]);
+    args[@"--max-fps"] = [NSString stringWithFormat:@"%d", frameRate];
+    StartScrcpyVideoPresentation(frameRate);
+
     NSMutableArray *argv = [NSMutableArray arrayWithArray:@[@"scrcpy"]];
     for (NSString *key in args) {
         id value = args[key];
@@ -559,6 +580,7 @@ void ScrcpyTryResetVideo(void) {
     }
     
     scrcpy_main((int)startArgs.count, (char **)args);
+    StopScrcpyVideoPresentation();
     SDL_SetiOSEventPump(false);
     
     // Remove SDL event filter to avoid blocking events

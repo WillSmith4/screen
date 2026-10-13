@@ -7,6 +7,7 @@
 
 #define avcodec_send_packet(...)        avcodec_send_packet_hijack(__VA_ARGS__)
 #define avcodec_receive_frame(...)        avcodec_receive_frame_hijack(__VA_ARGS__)
+#define sc_decoder_init sc_decoder_init_orig
 
 #include <time.h>
 
@@ -14,6 +15,9 @@
 
 #undef avcodec_receive_frame
 #undef avcodec_send_packet
+#undef sc_decoder_init
+#include "native-video.h"
+#include <stdatomic.h>
 
 int ScrcpyEnableHardwareDecoding(void);
 void ScrcpyTryResetVideo(void);
@@ -21,6 +25,106 @@ bool GetUpdateApplicationBackgroundState(bool update);
 int avcodec_send_packet(AVCodecContext *avctx, const AVPacket *avpkt);
 int avcodec_receive_frame(AVCodecContext *avctx, AVFrame *frame);
 AVFrame * ScrcpyHandleFrame(AVFrame *pending_frame);
+
+// scrcpy has one video stream and a separate audio decoder. The packet thread
+// owns this state; close/reset drain callbacks before changing sink state.
+static struct {
+    _Atomic(struct sc_decoder *) owner;
+    void *handle;
+    atomic_bool sink_failed;
+} native_video;
+
+static void native_buffer_free(void *opaque, uint8_t *data) {
+    (void)data;
+    ScrcpyReleasePixelBuffer(opaque);
+}
+
+static void native_frame(void *userdata, void *pixel_buffer, int width, int height, int64_t pts, bool keyframe) {
+    struct sc_decoder *decoder = userdata;
+    AVFrame *frame = av_frame_alloc();
+    if (!frame) { atomic_store(&native_video.sink_failed, true); return; }
+    ScrcpyRetainPixelBuffer(pixel_buffer);
+    frame->buf[0] = av_buffer_create(pixel_buffer, 1, native_buffer_free, pixel_buffer, AV_BUFFER_FLAG_READONLY);
+    if (!frame->buf[0]) {
+        ScrcpyReleasePixelBuffer(pixel_buffer);
+        av_frame_free(&frame);
+        atomic_store(&native_video.sink_failed, true);
+        return;
+    }
+    frame->format = AV_PIX_FMT_VIDEOTOOLBOX;
+    frame->data[3] = pixel_buffer;
+    frame->width = width;
+    frame->height = height;
+    frame->pts = pts;
+    if (keyframe) { frame->flags |= AV_FRAME_FLAG_KEY; }
+    // AVFrame is only an ownership/geometry envelope here. No FFmpeg decode
+    // or conversion occurs; recording continues to receive original packets.
+    ScrcpyHandleFrame(frame);
+    if (!sc_frame_source_sinks_push(&decoder->frame_source, frame)) {
+        atomic_store(&native_video.sink_failed, true);
+    }
+    av_frame_free(&frame);
+}
+
+static bool native_sink_open(struct sc_packet_sink *sink, AVCodecContext *ctx,
+                              const struct sc_stream_session *session) {
+    struct sc_decoder *decoder = DOWNCAST(sink);
+    if (!sc_decoder_open(decoder, ctx, session)) { return false; }
+    int codec = ctx->codec_id == AV_CODEC_ID_H264 ? SC_NATIVE_H264
+              : ctx->codec_id == AV_CODEC_ID_HEVC ? SC_NATIVE_HEVC : 0;
+    if (ScrcpyEnableHardwareDecoding() == 1 && ScrcpyNativeVideoSupported(codec)) {
+        assert(!native_video.owner);
+        native_video.owner = decoder;
+        atomic_store(&native_video.sink_failed, false);
+        native_video.handle = ScrcpyNativeVideoCreate(codec, native_frame, decoder);
+        if (!native_video.handle) {
+            native_video.owner = NULL;
+            sc_decoder_close(decoder);
+            return false;
+        }
+    }
+    return true;
+}
+
+static void native_sink_close(struct sc_packet_sink *sink) {
+    struct sc_decoder *decoder = DOWNCAST(sink);
+    if (native_video.owner == decoder) {
+        ScrcpyNativeVideoDestroy(native_video.handle);
+        native_video.handle = NULL;
+        native_video.owner = NULL;
+    }
+    sc_decoder_close(decoder);
+}
+
+static bool native_sink_push(struct sc_packet_sink *sink, const AVPacket *packet) {
+    struct sc_decoder *decoder = DOWNCAST(sink);
+    if (native_video.owner != decoder) { return sc_decoder_push(decoder, packet); }
+    if (atomic_load(&native_video.sink_failed)) { return false; }
+    if (GetUpdateApplicationBackgroundState(false)) {
+        ScrcpyNativeVideoReset(native_video.handle);
+        return true;
+    }
+    // Decode errors request a fresh keyframe through the existing rate limiter.
+    // Do not tear down the ADB/audio connection for a transient VT session loss.
+    ScrcpyNativeVideoPush(native_video.handle, packet->data, packet->size,
+        packet->pts == AV_NOPTS_VALUE ? 0 : packet->pts, (packet->flags & AV_PKT_FLAG_KEY) != 0);
+    return true;
+}
+
+static bool native_sink_session(struct sc_packet_sink *sink, const struct sc_stream_session *session) {
+    struct sc_decoder *decoder = DOWNCAST(sink);
+    if (native_video.owner == decoder) { ScrcpyNativeVideoReset(native_video.handle); }
+    return sc_decoder_push_session(decoder, session);
+}
+
+void sc_decoder_init(struct sc_decoder *decoder, const char *name) {
+    sc_decoder_init_orig(decoder, name);
+    static const struct sc_packet_sink_ops ops = {
+        .open = native_sink_open, .close = native_sink_close,
+        .push = native_sink_push, .push_session = native_sink_session,
+    };
+    decoder->packet_sink.ops = &ops;
+}
 
 // Static buffer for converted YUV planes
 static Uint8 *converted_Y_buffer = NULL;

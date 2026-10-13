@@ -2,6 +2,7 @@
 #include "stylus-protocol.h"
 #include "screen.h"
 #include "util/sdl.h"
+#include "ios-geometry.h"
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 
@@ -56,7 +57,7 @@ bool sc_stylus_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         sc_controller_push_msg(screen->controller, &msg);
         return true;
     }
-    struct sc_size win = sc_sdl_get_window_size(screen->window);
+    struct sc_size win = sc_ios_window_size(screen->window);
     int32_t x = lroundf(data.x * win.width);
     int32_t y = lroundf(data.y * win.height);
     if (data.packet.action == 0 && (x < screen->rect.x || y < screen->rect.y ||

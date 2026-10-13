@@ -20,6 +20,10 @@
 #include <SDL3/SDL.h>
 
 #include "scrcpy-porting.h"
+#include "ios-geometry.h"
+#include "native-render-sdl.h"
+
+#define sc_sdl_get_window_size sc_ios_window_size
 
 static void SDL_DestroyWindow_hijack(SDL_Window *window);
 
@@ -28,6 +32,12 @@ static void SDL_DestroyWindow_hijack(SDL_Window *window);
 #define sc_screen_destroy(...)         sc_screen_destroy_orig(__VA_ARGS__)
 #define sc_fps_counter_destroy(...)    sc_fps_counter_destroy_hijack(__VA_ARGS__)
 #define SDL_DestroyWindow(w)           SDL_DestroyWindow_hijack(w)
+#define sc_texture_set_from_frame sc_native_texture_set_from_frame
+#define SDL_SetRenderDrawColor sc_native_set_draw_color
+#define sc_sdl_render_clear sc_native_render_clear
+#define SDL_RenderTexture sc_native_render_texture
+#define SDL_RenderTextureRotated sc_native_render_texture_rotated
+#define sc_sdl_render_present sc_native_render_present
 
 #include "screen.c"
 
@@ -36,6 +46,12 @@ static void SDL_DestroyWindow_hijack(SDL_Window *window);
 #undef sc_screen_destroy
 #undef sc_fps_counter_destroy
 #undef SDL_DestroyWindow
+#undef sc_texture_set_from_frame
+#undef SDL_SetRenderDrawColor
+#undef sc_sdl_render_clear
+#undef SDL_RenderTexture
+#undef SDL_RenderTextureRotated
+#undef sc_sdl_render_present
 
 // Lifecycle guard state for the reused sc_screen / sc_fps_counter. Defined here
 // because sc_screen_init() below is the first user; the rationale is documented
@@ -108,6 +124,11 @@ sc_screen_init(struct sc_screen *screen,
     // Save current screen pointer
     sc_screen_current_screen(screen);
 
+    if (ScrcpyEnableHardwareDecoding() == 1) {
+        LOGI("[NativePresentation] SDL video GPU work bypassed; --print-fps counts "
+             "SDL frame bookkeeping, use [FramePacing] for native submissions");
+    }
+
     // [ScreenGeometry] One-shot snapshot of the coordinate systems in play, so a
     // device screenshot can be checked against real numbers rather than "looks
     // right". window is logical points; density is what upstream multiplies by
@@ -167,6 +188,11 @@ sc_screen_log_geometry_if_changed(struct sc_screen *screen) {
 
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+    // Refresh from the live UIView even when a restore kept identical bounds
+    // and SDL did not generate a resize. This also covers Pencil mapping.
+    if (screen->window && screen->video) {
+        sc_screen_update_content_rect(screen);
+    }
     extern bool sc_stylus_handle_event(struct sc_screen *, const SDL_Event *);
     if (sc_stylus_handle_event(screen, event)) {
         return;
