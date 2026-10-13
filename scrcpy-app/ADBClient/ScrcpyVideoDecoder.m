@@ -107,9 +107,15 @@
 }
 
 - (BOOL)createSession {
-    NSDictionary *specification = _requireHardware
-        ? @{(__bridge NSString *)kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: @YES}
-        : @{};
+    NSDictionary *specification = @{};
+    if (_requireHardware) {
+        if (@available(iOS 17.0, *)) {
+            specification = @{(__bridge NSString *)kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: @YES};
+        } else {
+            [self reportFailure:kVTVideoDecoderUnsupportedDataFormatErr];
+            return NO;
+        }
+    }
     // Let VideoToolbox choose native 8/10-bit and full/video range. All accepted
     // buffers have IOSurface backing; no CPU YUV conversion/upload is needed.
     NSDictionary *attributes = @{
@@ -127,8 +133,10 @@
     if (status != noErr) { [self reportFailure:status]; return NO; }
     VTSessionSetProperty(_session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
     CFTypeRef hardware = NULL;
-    VTSessionCopyProperty(_session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
-                          kCFAllocatorDefault, &hardware);
+    if (@available(iOS 17.0, *)) {
+        VTSessionCopyProperty(_session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                              kCFAllocatorDefault, &hardware);
+    }
     NSLog(@"[NativeVideo] %@ VideoToolbox directly, hardware=%@, inFlight<=3",
           _codec == kCMVideoCodecType_HEVC ? @"HEVC" : @"H264", hardware);
     if (hardware) { CFRelease(hardware); }

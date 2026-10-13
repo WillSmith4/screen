@@ -114,8 +114,9 @@ static NSString * const shaderSource = @
         dispatch_semaphore_signal(_slots);
         return status == kCVReturnSuccess ? ScrcpyMetalBusy : ScrcpyMetalUnsupported;
     }
-    CFTypeRef matrix = CVBufferGetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, NULL);
+    CFTypeRef matrix = CVBufferCopyAttachment(buffer, kCVImageBufferYCbCrMatrixKey, NULL);
     BOOL rec601 = matrix && CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4);
+    if (matrix) { CFRelease(matrix); }
     if (rec601 != _lastRec601) {
         _layer.colorspace = rec601 ? _srgb : _rec709;
         _lastRec601 = rec601;

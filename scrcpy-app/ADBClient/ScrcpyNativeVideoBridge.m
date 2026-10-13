@@ -8,8 +8,13 @@ static CMVideoCodecType codecType(int codec) {
 }
 
 bool ScrcpyNativeVideoSupported(int codec) {
-    return (codec == SC_NATIVE_H264 || codec == SC_NATIVE_HEVC)
-        && VTIsHardwareDecodeSupported(codecType(codec));
+    // Hardware enforcement/introspection keys are available starting in iOS
+    // 17. Older supported systems retain the existing FFmpeg/VT path.
+    if (@available(iOS 17.0, *)) {
+        return (codec == SC_NATIVE_H264 || codec == SC_NATIVE_HEVC)
+            && VTIsHardwareDecodeSupported(codecType(codec));
+    }
+    return false;
 }
 
 void *ScrcpyNativeVideoCreate(int codec, sc_native_video_output output, void *userdata) {
