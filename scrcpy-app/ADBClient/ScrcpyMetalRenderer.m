@@ -69,6 +69,10 @@ static NSString * const shaderSource = @
 - (void)drain {
     dispatch_group_wait(_inFlight, DISPATCH_TIME_FOREVER);
     CVMetalTextureCacheFlush(_cache, 0);
+    // iOS may reject GPU work while the app enters the background. Lifecycle
+    // drains must allow a fresh attempt after resume, rather than latch a
+    // temporary command-buffer error until the next connection.
+    atomic_store(&_failed, false);
 }
 
 - (void)dealloc {
