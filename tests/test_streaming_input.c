@@ -38,6 +38,15 @@ static void test_controller_congestion(void) {
     // Never replace coordinates belonging to an old display configuration.
     msg.inject_touch_event.position.screen_size.width = 2400;
     assert(!sc_touch_replace_pending(ring, 8, 6, 3, &msg));
+    // Rotating back must not reach across the intermediate orientation to
+    // replace an earlier point that happens to have the same dimensions.
+    ring[0].inject_touch_event.position.screen_size.width = 2400;
+    msg = motion(1, 4);
+    assert(!sc_touch_replace_pending(ring, 8, 6, 3, &msg));
+    assert(ring[7].inject_touch_event.position.point.x == 100002);
+    ring[0] = motion(1, 5);
+    ring[0].inject_touch_event.buttons = 1;
+    assert(!sc_touch_replace_pending(ring, 8, 6, 3, &msg));
     msg = motion(1, 4);
     msg.inject_touch_event.action = AMOTION_EVENT_ACTION_DOWN;
     assert(!sc_touch_replace_pending(ring, 8, 6, 3, &msg));

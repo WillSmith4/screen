@@ -24,11 +24,15 @@ sc_touch_replace_pending(struct sc_control_msg *data, size_t capacity,
         if (!sc_touch_is_motion(pending)) {
             break;
         }
-        if (pending->inject_touch_event.pointer_id == msg->inject_touch_event.pointer_id
-                && pending->inject_touch_event.buttons == msg->inject_touch_event.buttons
-                && pending->inject_touch_event.action_button == msg->inject_touch_event.action_button
-                && pending->inject_touch_event.position.screen_size.width == msg->inject_touch_event.position.screen_size.width
-                && pending->inject_touch_event.position.screen_size.height == msg->inject_touch_event.position.screen_size.height) {
+        if (pending->inject_touch_event.position.screen_size.width != msg->inject_touch_event.position.screen_size.width
+                || pending->inject_touch_event.position.screen_size.height != msg->inject_touch_event.position.screen_size.height) {
+            break;
+        }
+        if (pending->inject_touch_event.pointer_id == msg->inject_touch_event.pointer_id) {
+            if (pending->inject_touch_event.buttons != msg->inject_touch_event.buttons
+                    || pending->inject_touch_event.action_button != msg->inject_touch_event.action_button) {
+                break;
+            }
             *pending = *msg;
             return true;
         }

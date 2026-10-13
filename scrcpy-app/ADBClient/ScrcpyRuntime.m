@@ -360,7 +360,7 @@ static void RenderPixelBufferFrame(CVPixelBufferRef pixelBuffer,
             CFAbsoluteTime stalledFor = now - g_stallStartTime;
 
             // Tier 1 diagnostics. Throttled to every 10th consecutive drop:
-            // this runs on the decode thread at frame rate, so an unthrottled
+            // this runs on the presentation worker at frame rate, so an unthrottled
             // NSLog here would both flood the log and cost real time in the
             // frame path. The first drop is always logged so the start of an
             // episode is visible.

@@ -3,6 +3,7 @@
 #import "ScrcpyFramePresenter.h"
 
 static _Atomic(int) created, released, delivered, lastSequence;
+static dispatch_semaphore_t slowRenderer;
 static NSString *resultPath;
 
 static void finish(NSString *failure) {
@@ -43,13 +44,19 @@ static CVPixelBufferRef makeFrame(int sequence) {
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [UIViewController new];
     [self.window makeKeyAndVisible];
+    slowRenderer = dispatch_semaphore_create(0);
     self.presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CVPixelBufferRef frame,
             AVSampleBufferDisplayLayer *layer, CFTimeInterval deadline) {
         CHECK(!NSThread.isMainThread);
         CHECK(layer && deadline > 0);
         CVPixelBufferLockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
-        atomic_store(&lastSequence, *(int *)CVPixelBufferGetBaseAddress(frame));
+        int sequence = *(int *)CVPixelBufferGetBaseAddress(frame);
+        atomic_store(&lastSequence, sequence);
         CVPixelBufferUnlockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
+        if (sequence == 40000) {
+            CHECK(dispatch_semaphore_wait(slowRenderer,
+                dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0);
+        }
         atomic_fetch_add(&delivered, 1);
     }];
     [self.presenter startWithFrameRate:120];
@@ -103,6 +110,42 @@ static CVPixelBufferRef makeFrame(int sequence) {
             return;
         }
         CHECK(atomic_load(&lastSequence) == 30000);
+        [self.presenter setPaused:YES];
+        [self.presenter setPaused:NO];
+        CVPixelBufferRef slow = makeFrame(40000);
+        [self.presenter submitPixelBuffer:slow];
+        CVPixelBufferRelease(slow);
+        [self waitForSlowRenderer:100];
+    });
+}
+
+- (void)waitForSlowRenderer:(int)attempts {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (atomic_load(&lastSequence) != 40000 && attempts > 0) {
+            [self waitForSlowRenderer:attempts - 1];
+            return;
+        }
+        CHECK(atomic_load(&lastSequence) == 40000);
+        // A worker is stalled while the producer continues. UIKit must stay
+        // responsive and only the in-flight frame plus the newest may survive.
+        for (int i = 40001; i <= 50000; ++i) {
+            CVPixelBufferRef frame = makeFrame(i);
+            [self.presenter submitPixelBuffer:frame];
+            CVPixelBufferRelease(frame);
+        }
+        CHECK(atomic_load(&created) - atomic_load(&released) == 2);
+        dispatch_semaphore_signal(slowRenderer);
+        [self waitForLatestAfterStall:100];
+    });
+}
+
+- (void)waitForLatestAfterStall:(int)attempts {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (atomic_load(&lastSequence) != 50000 && attempts > 0) {
+            [self waitForLatestAfterStall:attempts - 1];
+            return;
+        }
+        CHECK(atomic_load(&lastSequence) == 50000);
         [self.presenter stop];
         CHECK(atomic_load(&created) == atomic_load(&released));
         finish(nil);
