@@ -1,12 +1,14 @@
 #import <UIKit/UIKit.h>
 #import <stdatomic.h>
 #import "ScrcpyFramePresenter.h"
+#import "ScrcpyMetalRenderer.h"
 #import <QuartzCore/CAMetalLayer.h>
 
 // Exercise the production tick's Standard branch with controlled deadlines,
 // then let the real CADisplayLink deliver a final frame in the simulator.
 @interface ScrcpyFramePresenter (TestClock)
 - (void)renderStandardAtTarget:(CFTimeInterval)target;
+- (ScrcpyMetalRenderer *)makeMetalRenderer;
 @end
 static _Atomic(int) created, released, delivered, lastSequence;
 static NSString *resultPath;
@@ -39,6 +41,49 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
         CVPixelBufferRelease(frame);
     }
 }
+
+// A controllable GPU boundary exercises production scheduling while main is
+// deliberately blocked (there are no CADisplayLink callbacks). Real shader
+// output is covered separately by NativeVideoTests.
+@interface TestMetalRenderer : ScrcpyMetalRenderer
+@property(nonatomic, strong) dispatch_semaphore_t entered;
+@property(nonatomic, strong) dispatch_semaphore_t releaseFirst;
+@property(nonatomic, strong) dispatch_semaphore_t completed;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *sequences;
+@end
+@implementation TestMetalRenderer
+- (instancetype)init {
+    if ((self = [super init])) {
+        _entered = dispatch_semaphore_create(0);
+        _releaseFirst = dispatch_semaphore_create(0);
+        _completed = dispatch_semaphore_create(0);
+        _sequences = [NSMutableArray new];
+    }
+    return self;
+}
+- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
+    CHECK(!NSThread.isMainThread && duration > 0 && duration <= 1.0 / 30);
+    CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    int sequence = *(int *)CVPixelBufferGetBaseAddress(buffer);
+    CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    if (sequence == 50000) {
+        dispatch_semaphore_signal(_entered);
+        CHECK(dispatch_semaphore_wait(_releaseFirst, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    }
+    [_sequences addObject:@(sequence)];
+    dispatch_semaphore_signal(_completed);
+    return sequence == 50001 ? ScrcpyMetalBusy : sequence == 50002 ? ScrcpyMetalUnsupported : ScrcpyMetalPresented;
+}
+@end
+@interface TestPresenter : ScrcpyFramePresenter
+@property(nonatomic, strong) TestMetalRenderer *testMetal;
+@end
+@implementation TestPresenter
+- (ScrcpyMetalRenderer *)makeMetalRenderer {
+    self.testMetal = [TestMetalRenderer new];
+    return self.testMetal;
+}
+@end
 @interface PresenterTestDelegate : UIResponder <UIApplicationDelegate>
 @property(strong) UIWindow *window;
 @property(strong) ScrcpyFramePresenter *presenter;
@@ -50,7 +95,7 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [UIViewController new];
     [self.window makeKeyAndVisible];
-    self.presenter = [[ScrcpyFramePresenter alloc] initWithRenderer:^(CMSampleBufferRef sample,
+    self.presenter = [[TestPresenter alloc] initWithRenderer:^(CMSampleBufferRef sample,
             AVSampleBufferDisplayLayer *layer, CFTimeInterval deadline) {
         CHECK(NSThread.isMainThread);
         CHECK(layer && layer.controlTimebase == NULL && deadline > 0);
@@ -109,12 +154,39 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     submit(self.presenter, 40000);
     [self.presenter renderStandardAtTarget:CACurrentMediaTime()];
     [self.presenter stop];
-    [self.presenter startWithFrameRate:120 useMetal:YES];
+    [self.presenter startWithFrameRate:120 useMetal:YES framesToBuffer:3 asyncDequeue:YES];
     [self.presenter attachToView:view hardwareDecoding:YES];
     CHECK([self countLayers:CAMetalLayer.class inView:view] == 1);
     CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 0);
-    // Metal still bounds stalled presentation to its latest pending buffer.
-    for (int i = 50000; i < 60000; ++i) { submit(self.presenter, i); }
+    TestMetalRenderer *metal = ((TestPresenter *)self.presenter).testMetal;
+    submit(self.presenter, 50000);
+    CHECK(dispatch_semaphore_wait(metal.entered, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    // A burst while the GPU owns the first frame must remain FIFO, not replace
+    // all three pending frames with only the newest one.
+    submit(self.presenter, 50001); submit(self.presenter, 50002); submit(self.presenter, 50003);
+    dispatch_semaphore_signal(metal.releaseFirst);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    }
+    // Pause drains the production worker, making its counters stable.
+    // Read before pause (which resets metrics) after an explicit serial drain.
+    dispatch_sync([self.presenter valueForKey:@"renderQueue"], ^{});
+    CHECK(([metal.sequences isEqualToArray:@[@50000, @50001, @50002, @50003]]));
+    CHECK([[self.presenter valueForKey:@"renderCalls"] unsignedIntegerValue] == 2);
+    CHECK([[self.presenter valueForKey:@"metalBusy"] unsignedIntegerValue] == 1);
+    CHECK([[self.presenter valueForKey:@"metalErrors"] unsignedIntegerValue] == 1);
+    [self.presenter setPaused:YES];
+    submit(self.presenter, 59999);
+    CHECK(metal.sequences.count == 4);
+    [self.presenter setPaused:NO];
+    submit(self.presenter, 60000);
+    CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    dispatch_sync([self.presenter valueForKey:@"renderQueue"], ^{});
+    CHECK([metal.sequences.lastObject intValue] == 60000);
+    // A producer can start before its UIView attaches. Bound and release this
+    // backlog too, without scheduling work against an unattached CAMetalLayer.
+    [self.presenter startWithFrameRate:120 useMetal:YES];
+    for (int i = 70000; i < 80000; ++i) { submit(self.presenter, i); }
     [self.presenter startWithFrameRate:120 useMetal:NO];
     [self.presenter attachToView:view hardwareDecoding:YES];
     CHECK([self countLayers:CAMetalLayer.class inView:view] == 0);

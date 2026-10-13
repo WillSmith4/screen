@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #import <simd/simd.h>
 #import <stdatomic.h>
+#import <TargetConditionals.h>
 
 // Native bi-planar YUV -> RGB on the GPU. Textures reference the decoder's
 // IOSurface. Per-frame constants use Metal's inline storage, not shared buffers
@@ -81,15 +82,15 @@ static NSString * const shaderSource = @
     if (_rec709) { CGColorSpaceRelease(_rec709); }
 }
 
-- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer targetTime:(CFTimeInterval)target {
-    return [self renderPixelBuffer:buffer toTexture:nil targetTime:target];
+- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
+    return [self renderPixelBuffer:buffer toTexture:nil minimumDuration:duration];
 }
 
 - (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture {
-    return [self renderPixelBuffer:buffer toTexture:texture targetTime:0];
+    return [self renderPixelBuffer:buffer toTexture:texture minimumDuration:0];
 }
 
-- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture targetTime:(CFTimeInterval)target {
+- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture minimumDuration:(CFTimeInterval)duration {
     if (atomic_load(&_failed)) { return ScrcpyMetalUnsupported; }
     OSType format = CVPixelBufferGetPixelFormatType(buffer);
     BOOL ten = format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
@@ -99,7 +100,11 @@ static NSString * const shaderSource = @
     if ((!ten && format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
               && format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
             || CVPixelBufferGetPlaneCount(buffer) != 2) { return NO; }
-    if (dispatch_semaphore_wait(_slots, DISPATCH_TIME_NOW)) { return ScrcpyMetalBusy; }
+    // Like VoidLink, wait for GPU capacity on the render worker instead of
+    // discarding a decoded frame just because the previous GPU job is busy.
+    if (dispatch_semaphore_wait(_slots, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC))) {
+        return ScrcpyMetalBusy;
+    }
     CVMetalTextureRef luma = NULL, chroma = NULL;
     CVReturn status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, _cache, buffer,
         NULL, ten ? MTLPixelFormatR16Unorm : MTLPixelFormatR8Unorm,
@@ -171,10 +176,19 @@ static NSString * const shaderSource = @
         dispatch_semaphore_signal(self->_slots);
         dispatch_group_leave(self->_inFlight);
     }];
-    // Target the same next-vsync deadline as AVSB, without a CPU wait for GPU
-    // completion. Three slots bound outstanding drawables and frame ownership.
-    if (drawable) { [command presentDrawable:drawable atTime:MAX(target, CACurrentMediaTime())]; }
+    // VoidLink's Metal worker uses drawable/GPU backpressure, independently
+    // of CADisplayLink. Minimum duration prevents burst submissions replacing
+    // one another within a refresh. The simulator lacks device display timing.
+    if (drawable) {
+#if TARGET_OS_SIMULATOR
+        [command presentDrawable:drawable];
+#else
+        [command presentDrawable:drawable afterMinimumDuration:duration];
+#endif
+    }
     [command commit];
+    if (drawable) { [command waitUntilCompleted]; }
+    if (drawable && command.status == MTLCommandBufferStatusError) { return ScrcpyMetalUnsupported; }
     return ScrcpyMetalPresented;
 }
 @end

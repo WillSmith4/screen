@@ -4,8 +4,10 @@
 
 @interface ScrcpyQueuedFrame : NSObject
 @property(nonatomic, readonly) CMSampleBufferRef sampleBuffer;
+@property(nonatomic, readonly) CVPixelBufferRef pixelBuffer;
 @property(nonatomic, readonly) BOOL keyframe;
 - (instancetype)initWithSampleBuffer:(CMSampleBufferRef)sample keyframe:(BOOL)keyframe;
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)image keyframe:(BOOL)keyframe;
 @end
 
 // Serialized by the producer. Reuse the description until image metadata changes.

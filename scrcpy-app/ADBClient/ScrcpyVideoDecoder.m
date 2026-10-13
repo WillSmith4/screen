@@ -1,6 +1,7 @@
 #import "ScrcpyVideoDecoder.h"
 #import "annexb.h"
 #import <stdatomic.h>
+#import <QuartzCore/QuartzCore.h>
 
 @implementation ScrcpyVideoDecoder {
     CMVideoCodecType _codec;
@@ -15,6 +16,9 @@
     _Atomic(bool) _needsReset;
     int64_t _lastOutputPTS;
     CFAbsoluteTime _lastErrorLog;
+    uint64_t _packets;
+    _Atomic(uint64_t) _outputs, _lateOutputs, _emptyOutputs;
+    CFTimeInterval _metricsStart, _lastPacketTime, _maxPacketGap;
 }
 
 - (instancetype)initWithCodec:(CMVideoCodecType)codec requireHardware:(BOOL)requireHardware
@@ -30,6 +34,7 @@
         _slots = dispatch_semaphore_create(3);
         _waitingForKeyframe = YES;
         _lastOutputPTS = INT64_MIN;
+        _metricsStart = CACurrentMediaTime();
     }
     return self;
 }
@@ -131,16 +136,35 @@
         (__bridge CFDictionaryRef)specification, (__bridge CFDictionaryRef)attributes,
         NULL, &_session);
     if (status != noErr) { [self reportFailure:status]; return NO; }
-    VTSessionSetProperty(_session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
+    OSStatus realtimeStatus = VTSessionSetProperty(_session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
     CFTypeRef hardware = NULL;
+    OSStatus hardwareStatus = kVTPropertyNotSupportedErr;
     if (@available(iOS 17.0, *)) {
-        VTSessionCopyProperty(_session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+        hardwareStatus = VTSessionCopyProperty(_session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
                               kCFAllocatorDefault, &hardware);
     }
-    NSLog(@"[NativeVideo] %@ VideoToolbox directly, hardware=%@, inFlight<=3",
-          _codec == kCMVideoCodecType_HEVC ? @"HEVC" : @"H264", hardware);
+    NSLog(@"[NativeVideo] %@ VideoToolbox directly, hardwareRequired=%d hardware=%@ propertyStatus=%d realtimeStatus=%d inFlight<=3",
+          _codec == kCMVideoCodecType_HEVC ? @"HEVC" : @"H264", _requireHardware,
+          (__bridge id)hardware ?: @"unknown", (int)hardwareStatus, (int)realtimeStatus);
     if (hardware) { CFRelease(hardware); }
     return YES;
+}
+
+- (void)recordPacketArrival {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (_lastPacketTime) { _maxPacketGap = MAX(_maxPacketGap, now - _lastPacketTime); }
+    _lastPacketTime = now;
+    ++_packets;
+    double seconds = now - _metricsStart;
+    if (seconds < 5) { return; }
+    uint64_t outputs = atomic_exchange(&_outputs, 0);
+    uint64_t late = atomic_exchange(&_lateOutputs, 0), empty = atomic_exchange(&_emptyOutputs, 0);
+    NSLog(@"[NativeVideoStats] packets=%.1f/s output=%.1f/s maxPacketGapMs=%.1f late=%llu empty=%llu",
+          _packets / seconds, outputs / seconds, _maxPacketGap * 1000,
+          (unsigned long long)late, (unsigned long long)empty);
+    _packets = 0;
+    _maxPacketGap = 0;
+    _metricsStart = now;
 }
 
 - (BOOL)submitAnnexB:(const uint8_t *)data size:(size_t)size ptsUS:(int64_t)pts keyframe:(BOOL)keyframe {
@@ -174,6 +198,7 @@
         return !hasPicture && !atomic_load(&_needsReset);
     }
     if (!hasPicture) { return YES; } // Standalone codec configuration.
+    [self recordPacketArrival];
     if (!_format || (_waitingForKeyframe && !keyframe)) {
         if (_recovery) { _recovery(kVTVideoDecoderBadDataErr); }
         return YES;
@@ -211,8 +236,13 @@
                             if (outputPTS >= self->_lastOutputPTS && !atomic_load(&self->_needsReset)) {
                                 self->_lastOutputPTS = outputPTS;
                                 self->_output(image, outputPTS, keyframe);
+                                atomic_fetch_add(&self->_outputs, 1);
+                            } else {
+                                atomic_fetch_add(&self->_lateOutputs, 1);
                             }
                         }
+                    } else {
+                        atomic_fetch_add(&self->_emptyOutputs, 1);
                     }
                     dispatch_semaphore_signal(self->_slots);
                 }

@@ -20,7 +20,7 @@ Ustawienia: **Settings → Video → Rendering Mode → Standard**, **Frames to 
 
 Zgodność dotyczy opisanej polityki Standard i decyzji kolejkowania w zakresie fizycznej pojemności bufora. Zabezpieczono dwa przypadki graniczne: 15-klatkowy pierścień nie może zostać uszkodzony przez serię kolejnych IDR, a wyniki asynchroniczne ze starej sesji nie mogą pojawić się po pauzie/reconnect. Testy obejmują te zabezpieczenia oddzielnie od porównania z oryginałem.
 
-Nadal obowiązuje transport ADB, dekoder skonfigurowany dla scrcpy i geometria aplikacji. Nie przeniesiono protokołu Sunshine, HDR, interpolacji iOS 26, wykresów diagnostycznych ani eksperymentalnych dummy events. Metal i ograniczenie prac dekodera pozostają z poprzedniej wersji. Nie jest to obietnica identycznej wydajności dwóch różnych aplikacji.
+Nadal obowiązuje transport ADB, dekoder skonfigurowany dla scrcpy i geometria aplikacji. Nie przeniesiono protokołu Sunshine, HDR, interpolacji iOS 26, wykresów diagnostycznych ani eksperymentalnych dummy events. Kolejna poprawka planowania Metal i eliminacja podwójnej pracy SDL są opisane w [fps-log-investigation-2026-10-13.md](fps-log-investigation-2026-10-13.md). Nie jest to obietnica identycznej wydajności dwóch różnych aplikacji.
 
 ## Weryfikacja
 

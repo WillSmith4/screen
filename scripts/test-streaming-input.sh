@@ -11,3 +11,8 @@ cc -std=gnu11 -Wall -Wextra -Werror \
   $(pkg-config --cflags sdl3 libavcodec libavformat libavutil) tests/test_streaming_input.c \
   $(pkg-config --libs sdl3) -lm -o build/tests/test-streaming-input
 build/tests/test-streaming-input
+cc -std=gnu11 -Wall -Wextra -Werror \
+  -Ibuild/tests/streaming-config -Iscrcpy/app/src -Iporting/include \
+  $(pkg-config --cflags sdl3 libavcodec libavformat libavutil) tests/test_native_render_sdl.c \
+  -o build/tests/test-native-render-sdl
+build/tests/test-native-render-sdl

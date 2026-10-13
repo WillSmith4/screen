@@ -9,6 +9,7 @@
 
 @implementation ScrcpyQueuedFrame {
     CMSampleBufferRef _sampleBuffer;
+    CVPixelBufferRef _pixelBuffer;
     BOOL _keyframe;
 }
 - (instancetype)initWithSampleBuffer:(CMSampleBufferRef)sample keyframe:(BOOL)keyframe {
@@ -16,8 +17,18 @@
     return self;
 }
 - (CMSampleBufferRef)sampleBuffer { return _sampleBuffer; }
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)image keyframe:(BOOL)keyframe {
+    if ((self = [super init])) { _pixelBuffer = CVPixelBufferRetain(image); _keyframe = keyframe; }
+    return self;
+}
+- (CVPixelBufferRef)pixelBuffer {
+    return _pixelBuffer ?: CMSampleBufferGetImageBuffer(_sampleBuffer);
+}
 - (BOOL)keyframe { return _keyframe; }
-- (void)dealloc { CFRelease(_sampleBuffer); }
+- (void)dealloc {
+    if (_sampleBuffer) { CFRelease(_sampleBuffer); }
+    if (_pixelBuffer) { CVPixelBufferRelease(_pixelBuffer); }
+}
 @end
 
 @implementation ScrcpySampleBufferFactory {

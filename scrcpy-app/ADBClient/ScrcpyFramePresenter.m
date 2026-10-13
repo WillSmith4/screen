@@ -7,7 +7,6 @@
 
 @implementation ScrcpyFramePresenter {
     os_unfair_lock _lock;
-    CVPixelBufferRef _pending;
     dispatch_queue_t _renderQueue;
     void (^_renderer)(CMSampleBufferRef, AVSampleBufferDisplayLayer *, CFTimeInterval);
     ScrcpyFrameQueue *_frames;
@@ -17,9 +16,9 @@
     CADisplayLink *_displayLink;
     AVSampleBufferDisplayLayer *_layer;
     __weak UIView *_view;
-    BOOL _running, _paused, _workScheduled;
-    int _requestedFrameRate;
-    uint64_t _generation, _decoded, _replaced, _renderCalls, _ticks;
+    BOOL _running, _paused, _workScheduled, _attached;
+    int _requestedFrameRate, _displayFrameRate;
+    uint64_t _generation, _decoded, _replaced, _renderCalls, _ticks, _metalBusy, _metalErrors;
     CFTimeInterval _metricsStart;
     BOOL _useMetal;
     ScrcpyMetalRenderer *_metal;
@@ -41,6 +40,8 @@
     [self startWithFrameRate:frameRate useMetal:NO];
 }
 
+- (ScrcpyMetalRenderer *)makeMetalRenderer { return [ScrcpyMetalRenderer new]; }
+
 - (void)startWithFrameRate:(int)frameRate useMetal:(BOOL)useMetal {
     [self startWithFrameRate:frameRate useMetal:useMetal framesToBuffer:1 asyncDequeue:YES];
 }
@@ -58,7 +59,7 @@
     [_frames startWithFramesToBuffer:_framesToBuffer];
     _running = YES;
     _paused = NO;
-    _decoded = _replaced = _renderCalls = 0;
+    _decoded = _replaced = _renderCalls = _metalBusy = _metalErrors = 0;
     os_unfair_lock_unlock(&_lock);
     _ticks = 0;
     _metricsStart = CACurrentMediaTime();
@@ -69,6 +70,10 @@
     if (!_running || !view.window) { return; }
     if (_view != view) {
         // Drain presentation before moving its layer to a different view.
+        os_unfair_lock_lock(&_lock);
+        _attached = NO;
+        ++_generation;
+        os_unfair_lock_unlock(&_lock);
         dispatch_sync(_renderQueue, ^{});
         [_metal drain];
         [_metal.layer removeFromSuperlayer];
@@ -78,9 +83,10 @@
         _layer = nil;
     }
     if (hardwareDecoding && _useMetal && !_metal) {
-        _metal = [ScrcpyMetalRenderer new];
+        _metal = [self makeMetalRenderer];
         if (_metal) { [view.layer addSublayer:_metal.layer]; }
-        NSLog(@"[FramePacing] renderer=%@", _metal ? @"Metal (Experimental)" : @"Metal unavailable; select Standard and reconnect");
+        NSLog(@"[FramePacing] renderer=%@ queueBuffering=%d scheduling=frame-driven",
+              _metal ? @"Metal (Experimental)" : @"Metal unavailable; select Standard and reconnect", _framesToBuffer);
     }
     if (hardwareDecoding && !_useMetal && !_layer) {
         _layer = [AVSampleBufferDisplayLayer layer];
@@ -106,6 +112,11 @@
         [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:_useMetal ? NSRunLoopCommonModes : NSDefaultRunLoopMode];
     }
     int fps = sc_display_frame_rate(_requestedFrameRate, (int)view.window.screen.maximumFramesPerSecond);
+    os_unfair_lock_lock(&_lock);
+    _displayFrameRate = fps;
+    _attached = YES;
+    [self scheduleMetalLocked];
+    os_unfair_lock_unlock(&_lock);
     if (@available(iOS 15.0, *)) {
         _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(fps, fps, fps);
     } else {
@@ -127,76 +138,70 @@
         CVPixelBufferRelease(pixelBuffer);
         return;
     }
-    if (!_useMetal) {
-        // Prepare the sample on the producer, as VoidLink does. The format is
-        // cached; the display callback only changes output PTS and enqueues.
-        ScrcpyQueuedFrame *frame = [_samples frameWithPixelBuffer:pixelBuffer ptsUS:pts keyframe:keyframe];
-        if (frame) { ++_decoded; _replaced += [_frames enqueue:frame]; }
-        os_unfair_lock_unlock(&_lock);
-        CVPixelBufferRelease(pixelBuffer);
-        return;
-    }
-    CVPixelBufferRef previous = _pending;
-    _pending = pixelBuffer;
-    ++_decoded;
-    if (previous) { ++_replaced; }
+    // Both backends use the reference FIFO/drop policy. Standard prepares its
+    // sample on the producer; Metal retains the IOSurface-backed pixel buffer.
+    ScrcpyQueuedFrame *frame = _useMetal
+        ? [[ScrcpyQueuedFrame alloc] initWithPixelBuffer:pixelBuffer keyframe:keyframe]
+        : [_samples frameWithPixelBuffer:pixelBuffer ptsUS:pts keyframe:keyframe];
+    if (frame) { ++_decoded; _replaced += [_frames enqueue:frame]; }
+    [self scheduleMetalLocked];
     os_unfair_lock_unlock(&_lock);
-    if (previous) { CVPixelBufferRelease(previous); }
+    CVPixelBufferRelease(pixelBuffer);
 }
 
 - (void)displayTick:(CADisplayLink *)link {
     ++_ticks;
     CFTimeInterval now = CACurrentMediaTime();
-    AVSampleBufferDisplayLayer *layer = _layer;
     os_unfair_lock_lock(&_lock);
     if (now - _metricsStart >= 5.0) {
         double seconds = now - _metricsStart;
         uint64_t decoded = _decoded, replaced = _replaced, rendered = _renderCalls;
-        NSUInteger queued = _useMetal ? (_pending != NULL) : _frames.count;
-        _decoded = _replaced = _renderCalls = 0;
+        NSUInteger queued = _frames.count;
+        uint64_t busy = _metalBusy, errors = _metalErrors;
+        _decoded = _replaced = _renderCalls = _metalBusy = _metalErrors = 0;
         os_unfair_lock_unlock(&_lock);
-        NSLog(@"[FramePacing] callbacks=%.1f/s decoded=%.1f/s renderCalls=%.1f/s dropped=%llu queued=%lu mode=%@",
+        NSLog(@"[FramePacing] callbacks=%.1f/s decoded=%.1f/s submitted=%.1f/s queueDrops=%llu gpuBusy=%llu gpuErrors=%llu queued=%lu mode=%@",
               _ticks / seconds, decoded / seconds, rendered / seconds, (unsigned long long)replaced,
+              (unsigned long long)busy, (unsigned long long)errors,
               (unsigned long)queued, _useMetal ? @"Metal" : @"Standard");
         _ticks = 0;
         _metricsStart = now;
         os_unfair_lock_lock(&_lock);
     }
-    if (!_useMetal) {
-        os_unfair_lock_unlock(&_lock);
-        [self renderStandardAtTarget:link.targetTimestamp];
-        return;
-    }
-    if (!_running || _paused || !_pending || _workScheduled || (!layer && !_metal)) {
-        os_unfair_lock_unlock(&_lock);
-        return;
-    }
+    os_unfair_lock_unlock(&_lock);
+    // In Metal this clock only requests ProMotion and reports metrics, as in
+    // VoidLink. A frame arriving just after a tick need not wait another 8 ms.
+    if (!_useMetal) { [self renderStandardAtTarget:link.targetTimestamp]; }
+}
+
+// Caller owns _lock. One worker drains the FIFO until empty; producer and
+// worker change _workScheduled under the same lock so no wakeup is lost.
+- (void)scheduleMetalLocked {
+    if (!_useMetal || !_running || _paused || !_attached || !_metal || _workScheduled || !_frames.count) { return; }
     _workScheduled = YES;
     uint64_t generation = _generation;
-    os_unfair_lock_unlock(&_lock);
-    CFTimeInterval target = link.targetTimestamp;
+    ScrcpyFrameQueue *queue = _frames;
+    ScrcpyMetalRenderer *metal = _metal;
+    CFTimeInterval duration = 1.0 / MAX(1, _displayFrameRate);
     dispatch_async(_renderQueue, ^{
-        @autoreleasepool {
+        for (;;) { @autoreleasepool {
             os_unfair_lock_lock(&self->_lock);
-            CVPixelBufferRef frame = NULL;
+            ScrcpyQueuedFrame *frame = nil;
             if (self->_running && !self->_paused && self->_generation == generation) {
-                // Take the newest frame when the job actually runs, not when
-                // it is queued. Decoding never waits for rendering or UIKit.
-                frame = self->_pending;
-                self->_pending = NULL;
+                frame = [queue dequeue];
             }
+            if (!frame) { self->_workScheduled = NO; }
             os_unfair_lock_unlock(&self->_lock);
-            if (frame) {
-                // The session's explicit setting selects exactly one backend.
-                // Busy GPU work drops presentation, never switches renderers.
-                [self->_metal renderPixelBuffer:frame targetTime:target];
-                CVPixelBufferRelease(frame);
-            }
+            if (!frame) { break; }
+            ScrcpyMetalResult result = [metal renderPixelBuffer:frame.pixelBuffer minimumDuration:duration];
             os_unfair_lock_lock(&self->_lock);
-            if (frame) { ++self->_renderCalls; }
-            self->_workScheduled = NO;
+            if (self->_generation == generation) {
+                if (result == ScrcpyMetalPresented) { ++self->_renderCalls; }
+                else if (result == ScrcpyMetalBusy) { ++self->_metalBusy; }
+                else { ++self->_metalErrors; }
+            }
             os_unfair_lock_unlock(&self->_lock);
-        }
+        } }
     });
 }
 
@@ -241,9 +246,7 @@
     os_unfair_lock_lock(&_lock);
     _paused = paused;
     ++_generation;
-    _decoded = _replaced = _renderCalls = 0;
-    CVPixelBufferRef old = _pending;
-    _pending = NULL;
+    _decoded = _replaced = _renderCalls = _metalBusy = _metalErrors = 0;
     [_frames stop];
     if (!paused) {
         _frames = [ScrcpyFrameQueue new];
@@ -252,10 +255,12 @@
     [_samples reset];
     _needRequeuing = _framesToBuffer > 0;
     os_unfair_lock_unlock(&_lock);
-    if (old) { CVPixelBufferRelease(old); }
     _displayLink.paused = paused;
     // No synchronous dispatch to main occurs on the presentation worker.
     dispatch_sync(_renderQueue, ^{ [self->_layer flush]; [self->_metal drain]; });
+    os_unfair_lock_lock(&_lock);
+    [self scheduleMetalLocked];
+    os_unfair_lock_unlock(&_lock);
     _ticks = 0;
     _metricsStart = CACurrentMediaTime();
 }
@@ -266,13 +271,11 @@
     _displayLink = nil;
     os_unfair_lock_lock(&_lock);
     _running = NO;
+    _attached = NO;
     ++_generation;
-    CVPixelBufferRef old = _pending;
-    _pending = NULL;
     [_frames stop];
     [_samples reset];
     os_unfair_lock_unlock(&_lock);
-    if (old) { CVPixelBufferRelease(old); }
     dispatch_sync(_renderQueue, ^{ [self->_layer flushAndRemoveImage]; [self->_metal drain]; });
     [_metal.layer removeFromSuperlayer];
     _metal = nil;
