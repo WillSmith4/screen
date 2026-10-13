@@ -180,10 +180,15 @@ int main(int argc, const char **argv) {
         [renderer recordGPUTime:.1 generation:generation];
         assert([renderer takeStatistics].presented == 0);
         assert(fabs(renderer.averageGPUTime - initialGPUTime) < 1e-9);
+        // A fourth in-flight reservation fails immediately without consuming
+        // a slot. Releasing the three reservations restores full capacity.
+        for (int i = 0; i < 3; ++i) { assert([renderer tryAcquireGPUCapacity]); }
+        assert(![renderer tryAcquireGPUCapacity]);
+        for (int i = 0; i < 3; ++i) { [renderer releaseGPUCapacity]; }
         // Every error path consumes/releases exactly one reserved GPU slot.
         for (int i = 0; i < 10; ++i) {
-            assert([renderer waitForGPUCapacity]);
-            assert([renderer renderAcquiredPixelBuffer:NULL minimumDuration:1.0/120] == ScrcpyMetalUnsupported);
+            assert([renderer tryAcquireGPUCapacity]);
+            assert([renderer renderAcquiredPixelBuffer:NULL drawable:nil] == ScrcpyMetalUnsupported);
         }
         puts("PASS: Metal presentation counts, dropped/old callbacks, GPU-time EMA and reserved-slot error ownership");
     }

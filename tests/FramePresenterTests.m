@@ -10,6 +10,7 @@
 - (void)renderStandardAtTarget:(CFTimeInterval)target;
 - (ScrcpyMetalRenderer *)makeMetalRenderer;
 - (void)stopMetalThread;
+- (CAMetalDisplayLink *)makeMetalDisplayLink:(CAMetalLayer *)layer;
 @end
 static _Atomic(int) created, released, delivered, lastSequence;
 static NSString *resultPath;
@@ -43,9 +44,34 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     }
 }
 
-// A controllable GPU boundary exercises production scheduling while main is
-// deliberately blocked (there are no CADisplayLink callbacks). Real shader
-// output is covered separately by NativeVideoTests.
+// A controllable display clock and GPU boundary exercise production callbacks
+// while main is blocked. A real CAMetalDisplayLink is tested after main resumes.
+@interface TestMetalUpdate : NSObject
+@property(nonatomic) CFTimeInterval targetTimestamp;
+@property(nonatomic, strong) id drawable;
+@end
+@implementation TestMetalUpdate
+@end
+@interface TestMetalClock : NSObject
+@property(nonatomic) CAFrameRateRange preferredFrameRateRange;
+@property(nonatomic) float preferredFrameLatency;
+@property(nonatomic, weak) id<CAMetalDisplayLinkDelegate> delegate;
+@property(nonatomic, strong) NSTimer *timer;
+@end
+@implementation TestMetalClock
+- (void)addToRunLoop:(NSRunLoop *)runLoop forMode:(NSRunLoopMode)mode {
+    CHECK(!NSThread.isMainThread && [mode isEqual:NSRunLoopCommonModes]);
+    CHECK(_preferredFrameLatency == 1 && _preferredFrameRateRange.preferred > 0);
+    _timer = [NSTimer timerWithTimeInterval:1.0 / _preferredFrameRateRange.preferred repeats:YES block:^(NSTimer *timer) {
+        TestMetalUpdate *update = [TestMetalUpdate new];
+        update.targetTimestamp = CACurrentMediaTime() + 1.0 / self.preferredFrameRateRange.preferred;
+        update.drawable = [NSObject new];
+        [self.delegate metalDisplayLink:(id)self needsUpdate:(id)update];
+    }];
+    [runLoop addTimer:_timer forMode:mode];
+}
+- (void)invalidate { CHECK(!NSThread.isMainThread); [_timer invalidate]; _timer = nil; }
+@end
 @interface TestMetalRenderer : ScrcpyMetalRenderer
 @property(nonatomic, strong) dispatch_semaphore_t entered;
 @property(nonatomic, strong) dispatch_semaphore_t releaseFirst;
@@ -69,16 +95,16 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     }
     return self;
 }
-- (BOOL)waitForGPUCapacity {
+- (BOOL)tryAcquireGPUCapacity {
     if (_holdCapacity) {
         _holdCapacity = NO;
         dispatch_semaphore_signal(_capacityEntered);
         CHECK(dispatch_semaphore_wait(_capacityAvailable, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     }
-    return [super waitForGPUCapacity];
+    return [super tryAcquireGPUCapacity];
 }
-- (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
-    CHECK(!NSThread.isMainThread && duration > 0 && duration <= 1.0 / 30);
+- (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer drawable:(id<CAMetalDrawable>)drawable {
+    CHECK(!NSThread.isMainThread && drawable != nil);
     CHECK(NSThread.currentThread.qualityOfService == NSQualityOfServiceUserInteractive);
     CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
     int sequence = *(int *)CVPixelBufferGetBaseAddress(buffer);
@@ -99,11 +125,16 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
 @end
 @interface TestPresenter : ScrcpyFramePresenter
 @property(nonatomic, strong) TestMetalRenderer *testMetal;
+@property(nonatomic) BOOL useSystemClock;
 @end
 @implementation TestPresenter
 - (ScrcpyMetalRenderer *)makeMetalRenderer {
     self.testMetal = [TestMetalRenderer new];
+    self.testMetal.holdCapacity = !self.useSystemClock;
     return self.testMetal;
+}
+- (CAMetalDisplayLink *)makeMetalDisplayLink:(CAMetalLayer *)layer {
+    return self.useSystemClock ? [super makeMetalDisplayLink:layer] : (id)[TestMetalClock new];
 }
 @end
 @interface PresenterTestDelegate : UIResponder <UIApplicationDelegate>
@@ -183,25 +214,27 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     TestMetalRenderer *metal = ((TestPresenter *)self.presenter).testMetal;
     submit(self.presenter, 50000);
     CHECK(dispatch_semaphore_wait(metal.capacityEntered, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
-    CHECK([[[self.presenter valueForKey:@"frames"] valueForKey:@"count"] unsignedIntegerValue] == 1);
+    CHECK([[[self.presenter valueForKey:@"metalFrames"] valueForKey:@"count"] unsignedIntegerValue] == 1);
     dispatch_semaphore_signal(metal.capacityAvailable);
     CHECK(dispatch_semaphore_wait(metal.entered, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
-    // A burst while the GPU owns the first frame must remain FIFO, not replace
-    // all three pending frames with only the newest one.
+    // Moonlight's one pending image keeps the newest decoded frame in a burst.
     submit(self.presenter, 50001); submit(self.presenter, 50002); submit(self.presenter, 50003);
+    CHECK([[[self.presenter valueForKey:@"metalFrames"] valueForKey:@"count"] unsignedIntegerValue] == 1);
+    CHECK([[self.presenter valueForKey:@"replaced"] unsignedIntegerValue] == 2);
     dispatch_semaphore_signal(metal.releaseFirst);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 2; ++i) {
         CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     }
-    // The same thread remains alive across an empty FIFO, waking for one new
-    // frame despite depth=3, no prefill and no main/display-link callbacks.
     NSThread *thread = [self.presenter valueForKey:@"renderThread"];
     CHECK(thread && !thread.isFinished);
-    submit(self.presenter, 50004);
-    CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    // Single arrivals are displayed without prefill, despite Standard's depth=3.
+    for (NSNumber *sequence in @[@50001, @50002, @50004]) {
+        submit(self.presenter, sequence.intValue);
+        CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    }
     CHECK(thread == [self.presenter valueForKey:@"renderThread"]);
     [self.presenter stopMetalThread];
-    CHECK(([metal.sequences isEqualToArray:@[@50000, @50001, @50002, @50003, @50004]]));
+    CHECK(([metal.sequences isEqualToArray:@[@50000, @50003, @50001, @50002, @50004]]));
     CHECK([[self.presenter valueForKey:@"renderCalls"] unsignedIntegerValue] == 3);
     CHECK([[self.presenter valueForKey:@"metalBusy"] unsignedIntegerValue] == 1);
     CHECK([[self.presenter valueForKey:@"metalErrors"] unsignedIntegerValue] == 1);
@@ -236,6 +269,21 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
         if (atomic_load(&lastSequence) != 90000 && attempts > 0) { [self waitForLiveClock:attempts - 1]; return; }
         CHECK(atomic_load(&lastSequence) == 90000);
         [self.presenter stop];
+        ((TestPresenter *)self.presenter).useSystemClock = YES;
+        [self.presenter startWithFrameRate:120 useMetal:YES];
+        [self.presenter attachToView:self.window.rootViewController.view hardwareDecoding:YES];
+        submit(self.presenter, 90001);
+        [self waitForLiveMetalClock:100];
+    });
+}
+- (void)waitForLiveMetalClock:(int)attempts {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        TestMetalRenderer *metal = ((TestPresenter *)self.presenter).testMetal;
+        if (dispatch_semaphore_wait(metal.completed, DISPATCH_TIME_NOW) != 0 && attempts > 0) {
+            [self waitForLiveMetalClock:attempts - 1]; return;
+        }
+        [self.presenter stop];
+        CHECK([metal.sequences.lastObject intValue] == 90001);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
             CHECK(atomic_load(&created) == atomic_load(&released));
             CHECK(atomic_load(&lastSequence) == 90000);

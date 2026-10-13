@@ -1,5 +1,7 @@
 # Metal: pozostałe mechanizmy VoidLink
 
+> Opis historyczny. Bieżące planowanie Metal zastępuje [CAMetalDisplayLink z Moonlight](cametaldisplaylink-pacing.md).
+
 Referencja: lokalny VoidLink, commit `2d9558e1`. Zmiany dotyczą prezentacji i przekazywania wyników dekodera. Zależności, Drawing Toolkit, audio, nagrywanie i serwer Androida nie są zmieniane w tym etapie.
 
 ## Różnica względem Standard

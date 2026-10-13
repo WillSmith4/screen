@@ -6,7 +6,7 @@
 #import <os/lock.h>
 #include <math.h>
 
-// Metal pacing adapted from VoidLink (2d9558e1), Acaki / TrueZhuanjia.
+// Metal conversion/statistics adapted from VoidLink (2d9558e1), Acaki / TrueZhuanjia.
 // GPL-3.0; see docs/licenses/VoidLink-GPL-3.0.txt.
 
 // Native bi-planar YUV -> RGB on the GPU. Textures reference the decoder's
@@ -121,8 +121,8 @@ static NSString * const shaderSource = @
     }
     os_unfair_lock_unlock(&_statisticsLock);
 }
-- (BOOL)waitForGPUCapacity {
-    return dispatch_semaphore_wait(_slots, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) == 0;
+- (BOOL)tryAcquireGPUCapacity {
+    return dispatch_semaphore_wait(_slots, DISPATCH_TIME_NOW) == 0;
 }
 - (void)releaseGPUCapacity { dispatch_semaphore_signal(_slots); }
 
@@ -141,21 +141,17 @@ static NSString * const shaderSource = @
     if (_rec709) { CGColorSpaceRelease(_rec709); }
 }
 
-- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
-    if (![self waitForGPUCapacity]) { return ScrcpyMetalBusy; }
-    return [self renderAcquiredPixelBuffer:buffer minimumDuration:duration];
-}
-
-- (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
-    return [self renderPixelBuffer:buffer toTexture:nil minimumDuration:duration];
+- (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer drawable:(id<CAMetalDrawable>)drawable {
+    if (!drawable) { [self releaseGPUCapacity]; return ScrcpyMetalUnsupported; }
+    return [self renderPixelBuffer:buffer toTexture:drawable.texture drawable:drawable];
 }
 
 - (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture {
-    if (![self waitForGPUCapacity]) { return ScrcpyMetalBusy; }
-    return [self renderPixelBuffer:buffer toTexture:texture minimumDuration:0];
+    if (![self tryAcquireGPUCapacity]) { return ScrcpyMetalBusy; }
+    return [self renderPixelBuffer:buffer toTexture:texture drawable:nil];
 }
 
-- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture minimumDuration:(CFTimeInterval)duration {
+- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture drawable:(id<CAMetalDrawable>)drawable {
     if (!buffer || atomic_load(&_failed)) { [self releaseGPUCapacity]; return ScrcpyMetalUnsupported; }
     OSType format = CVPixelBufferGetPixelFormatType(buffer);
     BOOL ten = format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
@@ -177,8 +173,7 @@ static NSString * const shaderSource = @
             NULL, ten ? MTLPixelFormatRG16Unorm : MTLPixelFormatRG8Unorm,
             CVPixelBufferGetWidthOfPlane(buffer, 1), CVPixelBufferGetHeightOfPlane(buffer, 1), 1, &chroma);
     }
-    id<CAMetalDrawable> drawable = status == kCVReturnSuccess && !texture ? [_layer nextDrawable] : nil;
-    id<MTLTexture> destination = texture ?: drawable.texture;
+    id<MTLTexture> destination = texture;
     id<MTLCommandBuffer> command = status == kCVReturnSuccess && destination ? [_commands commandBuffer] : nil;
     if (!command) {
         if (luma) { CFRelease(luma); }
@@ -246,9 +241,8 @@ static NSString * const shaderSource = @
         dispatch_semaphore_signal(self->_slots);
         dispatch_group_leave(self->_inFlight);
     }];
-    // VoidLink's Metal worker uses drawable/GPU backpressure, independently
-    // of CADisplayLink. Minimum duration prevents burst submissions replacing
-    // one another within a refresh. The simulator lacks device display timing.
+    // CAMetalDisplayLink owns this drawable and its presentation deadline.
+    // Timed present/afterMinimumDuration is invalid for display-link drawables.
     if (drawable) {
 #if TARGET_OS_SIMULATOR || TARGET_OS_OSX
         [command presentDrawable:drawable];
@@ -257,7 +251,7 @@ static NSString * const shaderSource = @
         [drawable addPresentedHandler:^(id<MTLDrawable> displayed) {
             [self recordPresentedTime:displayed.presentedTime generation:generation];
         }];
-        [command presentDrawable:drawable afterMinimumDuration:duration];
+        [command presentDrawable:drawable];
 #endif
     }
     [command commit];
