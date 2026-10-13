@@ -1,5 +1,7 @@
 # Audyt obrazu, dotyku i 120 Hz
 
+Ten dokument opisuje wcześniejszy etap audytu i zmian dotyku/ProMotion. Opis jednej oczekującej klatki, osobnego workera i common modes dotyczył wtedy obu rendererów. Standard został następnie zastąpiony queue buffering VoidLink; aktualne zachowanie i testy opisuje [voidlink-standard-pacing.md](voidlink-standard-pacing.md), a obecny przepływ dekodowania i obu rendererów — [native-video-rendering.md](native-video-rendering.md).
+
 Data: 2026-10-13. Baza aplikacji przed zmianą: `945c572`.
 Źródło porównawcze: lokalny katalog `C:\Users\Admin\Documents\VoidLink-previously-moonlight-zwm`.
 Sprzęt do końcowego sprawdzenia: iPad Pro 12,9 cala M2, iPadOS 17.5.1, fizyczny telefon Xiaomi.

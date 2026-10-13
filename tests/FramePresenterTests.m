@@ -59,6 +59,7 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
         CVPixelBufferLockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
         atomic_store(&lastSequence, *(int *)CVPixelBufferGetBaseAddress(frame));
         CVPixelBufferUnlockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
+        CHECK(atomic_load(&lastSequence) != 40000); // No old-session delivery, even before the new frame.
         atomic_fetch_add(&delivered, 1);
     }];
     @autoreleasepool { [self exerciseStandard]; }

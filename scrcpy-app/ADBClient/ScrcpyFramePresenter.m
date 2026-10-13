@@ -152,11 +152,12 @@
     if (now - _metricsStart >= 5.0) {
         double seconds = now - _metricsStart;
         uint64_t decoded = _decoded, replaced = _replaced, rendered = _renderCalls;
+        NSUInteger queued = _useMetal ? (_pending != NULL) : _frames.count;
         _decoded = _replaced = _renderCalls = 0;
         os_unfair_lock_unlock(&_lock);
         NSLog(@"[FramePacing] callbacks=%.1f/s decoded=%.1f/s renderCalls=%.1f/s dropped=%llu queued=%lu mode=%@",
               _ticks / seconds, decoded / seconds, rendered / seconds, (unsigned long long)replaced,
-              (unsigned long)(_useMetal ? (_pending != NULL) : _frames.count), _useMetal ? @"Metal" : @"Standard");
+              (unsigned long)queued, _useMetal ? @"Metal" : @"Standard");
         _ticks = 0;
         _metricsStart = now;
         os_unfair_lock_lock(&_lock);
