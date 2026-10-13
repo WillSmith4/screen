@@ -86,6 +86,7 @@ def main():
             "rebuilt_build_machine": rebuilt_info.get("BuildMachineOSBuild"),
             "intentional_differences": ["Drawing Toolkit implementation", "Unsigned IPA instead of author's Ad Hoc signature",
                                        "Display-paced presentation and touch latency fixes; ProMotion Info.plist opt-in",
+                                       "Native H264/HEVC VideoToolbox decoder; selectable Standard AVSB or Metal SDR renderer",
                                        "Hosted runner macOS build metadata", "Recompiled code/assets and build identifiers"],
             "limits": "Static build parity checks do not prove identical runtime rendering or diagnose the AVD image issue.",
         }

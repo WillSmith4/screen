@@ -65,6 +65,18 @@ static void testDecode(NSString *directory, NSString *extension, CMVideoCodecTyp
         atomic_store(&recoveries, 0);
         [decoder reset];
     }
+    // Exercise actual asynchronous submission, draining only at the boundary.
+    expectedWidth = 128; expectedHeight = 96;
+    NSArray<NSData *> *burst = packets([directory stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@-small.packets", extension]]);
+    int beforeBurst = atomic_load(&outputs);
+    for (NSUInteger i = 0; i < burst.count; ++i) {
+        NSData *frame = burst[i];
+        assert([decoder submitAnnexB:frame.bytes size:frame.length ptsUS:i * 8333 keyframe:NO]);
+    }
+    [decoder drain];
+    assert(atomic_load(&outputs) > beforeBurst);
+    assert(atomic_load(&recoveries) == 0);
     const uint8_t malformed[] = {1,2,3,4};
     assert(![decoder submitAnnexB:malformed size:sizeof(malformed) ptsUS:0 keyframe:NO]);
     assert(atomic_load(&recoveries) > 0);
@@ -130,6 +142,8 @@ int main(int argc, const char **argv) {
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 16,128,128, 0,0,0);
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 235,128,128, 255,255,255);
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 63,102,240, 255,0,0);
+        checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 173,42,26, 0,255,0);
+        checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 32,240,118, 0,0,255);
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, 54,99,255, 254,0,0);
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, 64,512,512, 0,0,0);
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, 940,512,512, 255,255,255);

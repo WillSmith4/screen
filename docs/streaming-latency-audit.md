@@ -18,10 +18,13 @@ flowchart LR
   Args --> Android[Android: SurfaceEncoder / MediaCodec]
   Android --> ADB[ADB: strumień wideo]
   ADB --> Demux[scrcpy demuxer]
-  Demux --> FFmpeg[FFmpeg + VideoToolbox]
-  FFmpeg --> Presenter[ScrcpyFramePresenter: najnowsza klatka]
+  Demux --> Native[H264/HEVC: natywne VideoToolbox]
+  Demux --> FFmpeg[FFmpeg: pozostale kodeki / software]
+  Native --> Presenter[ScrcpyFramePresenter: najnowsza klatka]
+  FFmpeg --> Presenter
   Clock[CADisplayLink w common modes] --> Presenter
   Presenter --> Layer[AVSampleBufferDisplayLayer]
+  Presenter --> Metal[Opcjonalny Metal SDR]
   UIKit[UIKit / SDL: palce] --> Input[input_manager: ruch i nacisk]
   Input --> Geometry[screen: aktualny widok i obszar obrazu]
   Pencil[Drawing Toolkit: Pencil] --> Geometry
@@ -37,7 +40,7 @@ Główne miejsca w naszej aplikacji:
 |---|---|
 | Konfiguracja | `scrcpy-app/ADBClient/ScrcpyADBClient.m`: opcje sesji, niestandardowe flagi, `--max-fps`, uruchomienie i zakończenie scrcpy. |
 | Odbiór obrazu | `scrcpy/app/src/demuxer.c`, `decoder.c`; nakładki `porting/src/demuxer-porting.c`, `decoder-porting.c`: pakiety, FFmpeg, odzyskiwanie dekodera. |
-| Dekodowanie sprzętowe | `porting/src/demuxer-porting.c`: kontekst VideoToolbox; `ScrcpyRuntime.m`: odbiór `CVPixelBuffer` z `AVFrame.data[3]`. |
+| Dekodowanie sprzętowe | H.264/HEVC: `ScrcpyVideoDecoder.m` i `ScrcpyNativeVideoBridge.m` przekazują pakiety bezpośrednio do VideoToolbox. FFmpeg pozostaje dla pozostałych ścieżek; `AVFrame.data[3]` służy też jako opakowanie własności natywnego bufora. |
 | Prezentacja | `ScrcpyFramePresenter.m`: własność klatek, zegar, kolejka robocza, pauza i restart. `ScrcpyRuntime.m`: opakowanie bufora i przekazanie do warstwy. |
 | Okno i gesty | `scrcpy-app/Scrcpy Remote/SDL_uikitviewcontroller+Extend.m`, `porting/src/screen-porting.c`, `input_manager-porting.c`: geometria i przekazywanie zdarzeń. |
 | Palce | `scrcpy/app/src/input_manager.c`, `mouse_sdk.c`, `control_msg.c`; nakładki w `porting/src`: ACTION_DOWN/MOVE/UP, pozycja, identyfikatory palców, nacisk. |
@@ -76,7 +79,7 @@ Poniższe ścieżki odnoszą się do lokalnego katalogu VoidLink. Numery linii s
 | Zdekodowane bufory do AVSB / Metal, opcjonalny FrameInterpolator | Potwierdzone w `decodeFrameWithSampleBuffer`. Własność buforów i sposób opakowania zależą od backendu. |
 | CADisplayLink, targetTimestamp, mnożnik interpolacji | Potwierdzone w `displayLinkFrameRateForInterpolationEnabled`, `setupWithVideoFormat`, `renderModeAVSB` i `renderFrame`. AVSB rejestruje link w **NSDefaultRunLoopMode** (~409). Common modes jest w backendzie Metal; nie należy przypisywać go wszystkim ścieżkom VoidLink. |
 | AVSB render loop nigdy nie blokuje UI | Niepotwierdzone: `renderModeAVSB` może czekać na dequeue klatki. U nas callback zegara nie czeka na klatkę ani na wykonanie kolejki prezentacji. |
-| FrameQueue jako adaptacyjny mechanizm usuwania zaległości | `Stream/FrameQueue.m`: ring ma pojemność 15 i domyślny high-water mark 2; występuje obsługa przepełnienia. Część opisywanej logiki slack/history jest zakomentowana. Nie jest to gotowy dowód całkowitego usunięcia opóźnienia. |
+| FrameQueue jako adaptacyjny mechanizm usuwania zaległości | `Utility/FrameQueue.m`: ring ma pojemność 15 i domyślny high-water mark 2; występuje obsługa przepełnienia. Część opisywanej logiki slack/history jest zakomentowana. Nie jest to gotowy dowód całkowitego usunięcia opóźnienia. |
 | `Metal/MetalView.m`, własny wątek | Potwierdzone: CAMetalLayer, QoS user-interactive. To klasa priorytetu, nie gwarancja czasu rzeczywistego ani odporność na każde obciążenie. |
 | `Metal/MetalViewController.m`, trzy drawable i zegar | Potwierdzone: `maximumDrawableCount=3`, CADisplayLink w common modes oraz pętla wykorzystująca kolejkę klatek. |
 | `Metal/MetalVideoRenderer.m`, texture cache, CSC, HDR, semafor | Potwierdzone: tekstury z CVPixelBuffer, przeliczenia BT.601/709/2020 i limity klatek. „Zero-copy” dotyczy współdzielenia bufora/tekstur, nie dowodzi braku każdej kopii na całej trasie sieć → ekran. |
@@ -111,6 +114,8 @@ Poniższe ścieżki odnoszą się do lokalnego katalogu VoidLink. Numery linii s
 Dokumentacja Apple wyraźnie określa zakres CADisplayLink jako preferencję: [preferredFrameRateRange](https://developer.apple.com/documentation/quartzcore/cadisplaylink/preferredframeraterange), [obsługa ProMotion](https://developer.apple.com/documentation/quartzcore/optimizing-iphone-and-ipad-apps-to-support-promotion-displays). Korzystamy z API dostępnych przed iPadOS 17.5.1.
 
 ## Zachowany zakres
+
+Aktualizacja dekodowania i wybór Standard / Metal opisane są w [native-video-rendering.md](native-video-rendering.md). Ta późniejsza zmiana zastępuje wcześniejszą ścieżkę H.264/HEVC przez FFmpeg; pierwotne poprawki dotyku i pacingu pozostają.
 
 - Wersje bibliotek aplikacji, źródła zależności, bitrate, rozdzielczość i wybór enkodera Androida nie zostały zmienione w ramach tej poprawki.
 - Pozostają FFmpeg, VideoToolbox, SDL, dźwięk, schowek, nagrywanie, oprogramowaniowe dekodowanie i VNC.

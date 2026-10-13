@@ -6,8 +6,8 @@ typedef NS_ENUM(NSInteger, ScrcpyMetalResult) {
     ScrcpyMetalUnsupported = 0, ScrcpyMetalPresented, ScrcpyMetalBusy
 };
 
-// Worker-thread rendering; main-thread layer attachment/sizing. A false result
-// leaves presentation to AVSB (unsupported color format or GPU back-pressure).
+// Worker-thread rendering; main-thread layer attachment/sizing. Busy work is
+// dropped; the user-selected backend stays fixed for the streaming session.
 @interface ScrcpyMetalRenderer : NSObject
 @property(nonatomic, readonly) CAMetalLayer *layer;
 - (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer targetTime:(CFTimeInterval)target;
