@@ -53,7 +53,12 @@ def main():
         binaries = ("Scrcpy Remote", "Frameworks/VNCClient.framework/VNCClient",
                     "PlugIns/ScrcpyLiveActivityWidgetExtension.appex/ScrcpyLiveActivityWidgetExtension")
         for relative in binaries:
-            check(f"{relative}: linked libraries", dylibs(original.read(APP + relative)) == dylibs(rebuilt.read(APP + relative)))
+            expected = set(dylibs(original.read(APP + relative)))
+            if relative == "Scrcpy Remote":
+                # The user-selected Metal backend calls Apple's Metal API
+                # directly. All other library identities remain unchanged.
+                expected.add(("/System/Library/Frameworks/Metal.framework/Metal", 0xC))
+            check(f"{relative}: linked libraries", expected == set(dylibs(rebuilt.read(APP + relative))))
         app = rebuilt.read(APP + "Scrcpy Remote")
         framework = rebuilt.read(APP + "Frameworks/VNCClient.framework/VNCClient")
         for marker in (b"Lavf62.12.101", b"Lavc62.28.101", b"go1.24.3", b"lts_20240722"):
@@ -87,6 +92,7 @@ def main():
             "intentional_differences": ["Drawing Toolkit implementation", "Unsigned IPA instead of author's Ad Hoc signature",
                                        "Display-paced presentation and touch latency fixes; ProMotion Info.plist opt-in",
                                        "Native H264/HEVC VideoToolbox decoder; selectable Standard AVSB or Metal SDR renderer",
+                                       "Explicit link to Apple's system Metal.framework for the optional Metal renderer",
                                        "Hosted runner macOS build metadata", "Recompiled code/assets and build identifiers"],
             "limits": "Static build parity checks do not prove identical runtime rendering or diagnose the AVD image issue.",
         }
