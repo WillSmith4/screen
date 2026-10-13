@@ -88,7 +88,7 @@
         _metal = [self makeMetalRenderer];
         if (_metal) { [view.layer addSublayer:_metal.layer]; }
         NSLog(@"[FramePacing] renderer=%@ fifoHighWaterMark=%d prefill=off scheduling=dedicated-thread gpuBudget=on",
-              _metal ? @"Metal (Experimental)" : @"Metal unavailable; select Standard and reconnect", _framesToBuffer);
+              _metal ? @"Metal (Experimental)" : @"Metal unavailable; select Standard and reconnect", MAX(1, _framesToBuffer));
     }
     if (hardwareDecoding && !_useMetal && !_layer) {
         _layer = [AVSampleBufferDisplayLayer layer];
