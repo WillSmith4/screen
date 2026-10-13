@@ -24,4 +24,8 @@
 - (NSUInteger)enqueue:(ScrcpyQueuedFrame *)frame;
 - (ScrcpyQueuedFrame *)dequeue;
 - (ScrcpyQueuedFrame *)dequeueWithTimeout:(CFTimeInterval)timeout;
+// One Metal consumer sleeps without polling while the FIFO is empty. Stop or
+// interrupt cancels the current wait; interrupt preserves queued frames.
+- (BOOL)waitForEnqueue;
+- (void)interruptWaiters;
 @end

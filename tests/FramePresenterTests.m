@@ -9,6 +9,7 @@
 @interface ScrcpyFramePresenter (TestClock)
 - (void)renderStandardAtTarget:(CFTimeInterval)target;
 - (ScrcpyMetalRenderer *)makeMetalRenderer;
+- (void)stopMetalThread;
 @end
 static _Atomic(int) created, released, delivered, lastSequence;
 static NSString *resultPath;
@@ -49,6 +50,9 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
 @property(nonatomic, strong) dispatch_semaphore_t entered;
 @property(nonatomic, strong) dispatch_semaphore_t releaseFirst;
 @property(nonatomic, strong) dispatch_semaphore_t completed;
+@property(nonatomic, strong) dispatch_semaphore_t capacityEntered;
+@property(nonatomic, strong) dispatch_semaphore_t capacityAvailable;
+@property(nonatomic) BOOL holdCapacity;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *sequences;
 @property(nonatomic, copy) void (^onDrain)(void);
 @end
@@ -58,12 +62,24 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
         _entered = dispatch_semaphore_create(0);
         _releaseFirst = dispatch_semaphore_create(0);
         _completed = dispatch_semaphore_create(0);
+        _capacityEntered = dispatch_semaphore_create(0);
+        _capacityAvailable = dispatch_semaphore_create(0);
+        _holdCapacity = YES;
         _sequences = [NSMutableArray new];
     }
     return self;
 }
-- (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
+- (BOOL)waitForGPUCapacity {
+    if (_holdCapacity) {
+        _holdCapacity = NO;
+        dispatch_semaphore_signal(_capacityEntered);
+        CHECK(dispatch_semaphore_wait(_capacityAvailable, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    }
+    return [super waitForGPUCapacity];
+}
+- (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
     CHECK(!NSThread.isMainThread && duration > 0 && duration <= 1.0 / 30);
+    CHECK(NSThread.currentThread.qualityOfService == NSQualityOfServiceUserInteractive);
     CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
     int sequence = *(int *)CVPixelBufferGetBaseAddress(buffer);
     CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
@@ -72,6 +88,7 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
         CHECK(dispatch_semaphore_wait(_releaseFirst, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     }
     [_sequences addObject:@(sequence)];
+    [self releaseGPUCapacity];
     dispatch_semaphore_signal(_completed);
     return sequence == 50001 ? ScrcpyMetalBusy : sequence == 50002 ? ScrcpyMetalUnsupported : ScrcpyMetalPresented;
 }
@@ -165,6 +182,9 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     CHECK([self countLayers:AVSampleBufferDisplayLayer.class inView:view] == 0);
     TestMetalRenderer *metal = ((TestPresenter *)self.presenter).testMetal;
     submit(self.presenter, 50000);
+    CHECK(dispatch_semaphore_wait(metal.capacityEntered, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    CHECK([[[self.presenter valueForKey:@"frames"] valueForKey:@"count"] unsignedIntegerValue] == 1);
+    dispatch_semaphore_signal(metal.capacityAvailable);
     CHECK(dispatch_semaphore_wait(metal.entered, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     // A burst while the GPU owns the first frame must remain FIFO, not replace
     // all three pending frames with only the newest one.
@@ -173,28 +193,33 @@ static void submit(ScrcpyFramePresenter *presenter, int sequence) {
     for (int i = 0; i < 4; ++i) {
         CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     }
-    // Pause drains the production worker, making its counters stable.
-    // Read before pause (which resets metrics) after an explicit serial drain.
-    dispatch_sync([self.presenter valueForKey:@"renderQueue"], ^{});
-    CHECK(([metal.sequences isEqualToArray:@[@50000, @50001, @50002, @50003]]));
-    CHECK([[self.presenter valueForKey:@"renderCalls"] unsignedIntegerValue] == 2);
+    // The same thread remains alive across an empty FIFO, waking for one new
+    // frame despite depth=3, no prefill and no main/display-link callbacks.
+    NSThread *thread = [self.presenter valueForKey:@"renderThread"];
+    CHECK(thread && !thread.isFinished);
+    submit(self.presenter, 50004);
+    CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    CHECK(thread == [self.presenter valueForKey:@"renderThread"]);
+    [self.presenter stopMetalThread];
+    CHECK(([metal.sequences isEqualToArray:@[@50000, @50001, @50002, @50003, @50004]]));
+    CHECK([[self.presenter valueForKey:@"renderCalls"] unsignedIntegerValue] == 3);
     CHECK([[self.presenter valueForKey:@"metalBusy"] unsignedIntegerValue] == 1);
     CHECK([[self.presenter valueForKey:@"metalErrors"] unsignedIntegerValue] == 1);
     [self.presenter setPaused:YES];
     submit(self.presenter, 59999);
-    CHECK(metal.sequences.count == 4);
+    CHECK(metal.sequences.count == 5);
     __weak ScrcpyFramePresenter *resuming = self.presenter;
     metal.onDrain = ^{
         CHECK(![[resuming valueForKey:@"attached"] boolValue]);
         // A decoded frame arriving during the resume drain is retained, but
         // cannot start a worker ahead of the lifecycle barrier.
         submit(resuming, 60000);
-        CHECK(![[resuming valueForKey:@"workScheduled"] boolValue]);
+        CHECK([resuming valueForKey:@"renderThread"] == nil);
     };
     [self.presenter setPaused:NO];
     metal.onDrain = nil;
     CHECK(dispatch_semaphore_wait(metal.completed, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
-    dispatch_sync([self.presenter valueForKey:@"renderQueue"], ^{});
+    [self.presenter stopMetalThread];
     CHECK([metal.sequences.lastObject intValue] == 60000);
     // A producer can start before its UIView attaches. Bound and release this
     // backlog too, without scheduling work against an unattached CAMetalLayer.

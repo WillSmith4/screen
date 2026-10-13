@@ -3,6 +3,11 @@
 #import <stdatomic.h>
 #import <QuartzCore/QuartzCore.h>
 
+static void recordMaximum(_Atomic(uint64_t) *destination, uint64_t value) {
+    uint64_t previous = atomic_load(destination);
+    while (value > previous && !atomic_compare_exchange_weak(destination, &previous, value)) {}
+}
+
 @implementation ScrcpyVideoDecoder {
     CMVideoCodecType _codec;
     BOOL _requireHardware, _waitingForKeyframe, _closed;
@@ -13,12 +18,14 @@
     void (^_output)(CVPixelBufferRef, int64_t, BOOL);
     void (^_recovery)(OSStatus);
     dispatch_semaphore_t _slots;
+    dispatch_queue_t _outputQueue;
     _Atomic(bool) _needsReset;
     int64_t _lastOutputPTS;
     CFAbsoluteTime _lastErrorLog;
     uint64_t _packets;
     _Atomic(uint64_t) _outputs, _lateOutputs, _emptyOutputs;
-    CFTimeInterval _metricsStart, _lastPacketTime, _maxPacketGap;
+    _Atomic(uint64_t) _decodeTimeNS, _decodeCallbacks, _maxOutputWaitNS;
+    CFTimeInterval _metricsStart, _lastPacketTime, _maxPacketGap, _maxSlotWait;
 }
 
 - (instancetype)initWithCodec:(CMVideoCodecType)codec requireHardware:(BOOL)requireHardware
@@ -32,6 +39,12 @@
         _parameters = [NSMutableDictionary dictionary];
         _outputLock = [NSObject new];
         _slots = dispatch_semaphore_create(3);
+        // VoidLink hands decoded frames to a serial user-interactive queue.
+        // Keep the slot until delivery ends, bounding decode + queued delivery
+        // together instead of building an unbounded backlog of pixel buffers.
+        _outputQueue = dispatch_queue_create("scrcpy.video.decoded-output",
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+        dispatch_queue_set_specific(_outputQueue, (__bridge const void *)self, (__bridge void *)self, NULL);
         _waitingForKeyframe = YES;
         _lastOutputPTS = INT64_MIN;
         _metricsStart = CACurrentMediaTime();
@@ -52,7 +65,9 @@
 }
 
 - (void)drain {
+    NSAssert(!dispatch_get_specific((__bridge const void *)self), @"Drain belongs to the packet thread, not output callbacks");
     if (_session) { VTDecompressionSessionWaitForAsynchronousFrames(_session); }
+    dispatch_sync(_outputQueue, ^{});
 }
 
 - (void)reset {
@@ -143,7 +158,7 @@
         hardwareStatus = VTSessionCopyProperty(_session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
                               kCFAllocatorDefault, &hardware);
     }
-    NSLog(@"[NativeVideo] %@ VideoToolbox directly, hardwareRequired=%d hardware=%@ propertyStatus=%d realtimeStatus=%d inFlight<=3",
+    NSLog(@"[NativeVideo] %@ VideoToolbox directly, hardwareRequired=%d hardware=%@ propertyStatus=%d realtimeStatus=%d inFlight<=3 outputQueue=user-interactive",
           _codec == kCMVideoCodecType_HEVC ? @"HEVC" : @"H264", _requireHardware,
           (__bridge id)hardware ?: @"unknown", (int)hardwareStatus, (int)realtimeStatus);
     if (hardware) { CFRelease(hardware); }
@@ -159,11 +174,15 @@
     if (seconds < 5) { return; }
     uint64_t outputs = atomic_exchange(&_outputs, 0);
     uint64_t late = atomic_exchange(&_lateOutputs, 0), empty = atomic_exchange(&_emptyOutputs, 0);
-    NSLog(@"[NativeVideoStats] packets=%.1f/s output=%.1f/s maxPacketGapMs=%.1f late=%llu empty=%llu",
+    uint64_t decodeTime = atomic_exchange(&_decodeTimeNS, 0), callbacks = atomic_exchange(&_decodeCallbacks, 0);
+    uint64_t outputWait = atomic_exchange(&_maxOutputWaitNS, 0);
+    NSLog(@"[NativeVideoStats] packets=%.1f/s output=%.1f/s maxPacketGapMs=%.1f late=%llu empty=%llu decodeMeanMs=%.3f outputWaitMaxMs=%.3f slotWaitMaxMs=%.3f",
           _packets / seconds, outputs / seconds, _maxPacketGap * 1000,
-          (unsigned long long)late, (unsigned long long)empty);
+          (unsigned long long)late, (unsigned long long)empty,
+          callbacks ? (double)decodeTime / callbacks / 1e6 : 0, outputWait / 1e6, _maxSlotWait * 1000);
     _packets = 0;
     _maxPacketGap = 0;
+    _maxSlotWait = 0;
     _metricsStart = now;
 }
 
@@ -206,7 +225,10 @@
     if (!_session && ![self createSession]) { return NO; }
     // Bound hardware work without breaking reference-frame dependencies. A
     // timeout requests a fresh IDR before any further inter-frame submission.
-    if (dispatch_semaphore_wait(_slots, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC))) {
+    CFTimeInterval slotWaitStart = CACurrentMediaTime();
+    long slotStatus = dispatch_semaphore_wait(_slots, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC));
+    _maxSlotWait = MAX(_maxSlotWait, CACurrentMediaTime() - slotWaitStart);
+    if (slotStatus) {
         [self reportFailure:kVTVideoDecoderMalfunctionErr];
         return NO;
     }
@@ -223,15 +245,21 @@
     }
     if (status == noErr) {
         _waitingForKeyframe = NO;
+        CFTimeInterval decodeStart = CACurrentMediaTime();
         status = VTDecompressionSessionDecodeFrameWithOutputHandler(_session, sample,
             kVTDecodeFrame_EnableAsynchronousDecompression, NULL,
             ^(OSStatus error, VTDecodeInfoFlags flags, CVImageBufferRef image, CMTime presentation, CMTime duration) {
                 @autoreleasepool {
+                    CFTimeInterval finished = CACurrentMediaTime();
+                    atomic_fetch_add(&self->_decodeTimeNS, (uint64_t)((finished - decodeStart) * 1e9));
+                    atomic_fetch_add(&self->_decodeCallbacks, 1);
                     if (error != noErr) {
                         [self reportFailure:error];
                     } else if (image) {
                         int64_t outputPTS = CMTimeConvertScale(presentation, 1000000, kCMTimeRoundingMethod_Default).value;
-                        @synchronized (self->_outputLock) {
+                        CVPixelBufferRetain(image);
+                        dispatch_async(self->_outputQueue, ^{ @autoreleasepool {
+                            recordMaximum(&self->_maxOutputWaitNS, (uint64_t)((CACurrentMediaTime() - finished) * 1e9));
                             // Late callbacks never move the visible image backwards.
                             if (outputPTS >= self->_lastOutputPTS && !atomic_load(&self->_needsReset)) {
                                 self->_lastOutputPTS = outputPTS;
@@ -240,7 +268,10 @@
                             } else {
                                 atomic_fetch_add(&self->_lateOutputs, 1);
                             }
-                        }
+                            CVPixelBufferRelease(image);
+                            dispatch_semaphore_signal(self->_slots);
+                        } });
+                        return;
                     } else {
                         atomic_fetch_add(&self->_emptyOutputs, 1);
                     }

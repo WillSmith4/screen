@@ -12,12 +12,13 @@ flowchart LR
   ADB --> Native[Annex-B i CoreMedia]
   Native --> VT[VideoToolbox: H.264 / HEVC]
   VT --> Surface[CVPixelBuffer / IOSurface]
-  Surface --> Presenter[ScrcpyFramePresenter]
+  Surface --> Output[Serial user-interactive output queue]
+  Output --> Presenter[ScrcpyFramePresenter]
   Clock[CADisplayLink do 120 Hz] --> Presenter
   Setting[Rendering Mode] --> Presenter
   Presenter --> Queue[Standard: FIFO VoidLink]
   Queue --> Standard[AVSampleBufferDisplayLayer]
-  Presenter --> MetalQueue[Metal: FIFO i worker budzony przez klatki]
+  Presenter --> MetalQueue[Metal: FIFO bez prefill i stały NSThread]
   MetalQueue --> Metal[CVMetalTextureCache i CAMetalLayer]
 ```
 
@@ -34,11 +35,17 @@ W ramach jednej sesji tworzony jest tylko wybrany renderer. Nie ma detekcji HDR,
 | Współdzielone bufory GPU | `Metal/MetalVideoRenderer.m` | IOSurface → CVMetalTextureCache → tekstury Y/UV; bez odczytu i przesyłania pikseli przez CPU. |
 | Kolejka Standard | `Utility/FrameQueue.m`, `Stream/VideoDecoderRenderer.m` | FIFO, bufor 0–5 (domyślnie 1), naprzemienne odrzucanie, ochrona IDR, oczekiwanie do terminu prezentacji. Szczegóły i test zgodności: [voidlink-standard-pacing.md](voidlink-standard-pacing.md). |
 | Prezentacja Standard | `Stream/VideoDecoderRenderer.m` | Cache formatu i gotowe CMSampleBuffer na producencie; bez własnego timebase; output PTS równy targetTimestamp; AVSB bez dodatkowego odrzucania według readiness. |
-| Planowanie Metal | `Metal/MetalViewController.m`, `Metal/MetalVideoRenderer.m` | FIFO zamiast nadpisywania najnowszej klatki; worker budzony przy nadejściu danych, niezależny od CADisplayLink; oczekiwanie na GPU i `afterMinimumDuration:1/fps`. |
+| Planowanie Metal | `Metal/MetalView.m`, `Metal/MetalViewController.m`, `Metal/MetalVideoRenderer.m` | Stały NSThread user-interactive; rezerwacja miejsca w GPU, oczekiwanie na semaforze kolejki, pobranie klatki z budżetem `1/fps − averageGPUTime`; `afterMinimumDuration:1/fps` i `waitUntilCompleted`. Bez prefill i sterowania rysowaniem przez CADisplayLink. |
+| Pomiar GPU i prezentacji | `Metal/MetalVideoRenderer.m` | Średnia GPU z wagą 0,25 dla nowej próbki; zwalnianie tekstur i czyszczenie cache po ukończeniu GPU; `addPresentedHandler` / `presentedTime` na urządzeniu iOS. |
+| Odbiór dekodowania | `Stream/VideoDecoderRenderer.m`, `_vtq` | Osobna serial queue user-interactive; bufor jest zachowany aż do dostarczenia; reset/close czekają również na tę kolejkę. Łączny limit dekodowania i oczekujących wyników: 3. |
 | Priorytet i odświeżanie | `Stream/VideoDecoderRenderer.m`, `Metal/MetalView.m`, `Metal/MetalViewController.m` | Worker user-interactive, CADisplayLink: default mode dla Standard, common modes dla Metal; częstotliwość ograniczona możliwościami ekranu. |
 | Kolor SDR i geometria | `Metal/MetalVideoRenderer.m` | Przeliczenie YUV na RGB na GPU, zachowanie proporcji obrazu, czarne pasy. |
 
-To adaptacja architektury do strumienia scrcpy i iPadOS 17.5.1, a nie skopiowanie całego silnika VoidLink. Zachowano własny protokół ADB, geometrię wejścia i Drawing Toolkit. Nie dodano funkcji Sunshine, interpolacji wymagającej iOS 26 ani HDR. Po analizie logów z 13 października Metal korzysta również z `waitUntilCompleted` na swoim workerze oraz minimalnego czasu prezentacji z VoidLink. CADisplayLink utrzymuje żądanie ProMotion i statystyki, lecz nie wyzwala rysowania Metal. Worker zasypia, gdy FIFO jest puste, i jest budzony przez producenta zamiast stałej pętli referencji. Flaga asynchronicznego dekodowania VideoToolbox pozostaje ustawiona jawnie.
+To adaptacja architektury do strumienia scrcpy i iPadOS 17.5.1, a nie skopiowanie całego silnika VoidLink. Zachowano własny protokół ADB, geometrię wejścia i Drawing Toolkit. CADisplayLink utrzymuje żądanie ProMotion i statystyki, lecz nie wyzwala rysowania Metal. Stały wątek Metal zasypia na semaforze pustej kolejki i jest budzony przez nadejście klatki lub zatrzymanie sesji. Flaga asynchronicznego dekodowania VideoToolbox pozostaje ustawiona jawnie.
+
+**Metal nie ma wybieranego trybu Queue Buffering.** Tak jak `SettingsSwiftUI.swift` VoidLink, UI pokazuje `Frames to Buffer` i `Async Frame Dequeue` tylko dla Standard. Obie ścieżki referencji korzystają jednak z `FrameQueue`, której próg odrzucania pochodzi ze wspólnej zapisanej wartości `frameQueueSize`. Metal nie korzysta z `_needRequeuing` i nie czeka na początkowe napełnienie. Nasza implementacja zachowuje tę różnicę; log Metal nazywa próg `fifoHighWaterMark`, a nie `queueBuffering`.
+
+Nie przeniesiono HDR (zgodnie z wymaganiem), interpolacji wymagającej iOS 26, protokołu Sunshine ani eksperymentalnego `Dummy Event`. Ten ostatni wysyła `LiSendKeyboardEvent(0xFF, KEY_ACTION_UP, 0)` do hosta Moonlight/Sunshine. To nie jest neutralny komunikat scrcpy: 255 w przestrzeni kodów Androida oznacza rzeczywisty klawisz. Wysyłanie go lub nowego pakietu no-op przez ADB nie byłoby tym samym mechanizmem ani potwierdzoną optymalizacją iPadOS 17.5.1. Nie zmieniono protokołu sterowania ani serwera Androida. Różnice i źródła: [voidlink-metal-pacing.md](voidlink-metal-pacing.md).
 
 ## Własność i odzyskiwanie
 
@@ -58,6 +65,7 @@ Nowy renderer wymaga bezpośredniego linkowania systemowego `Metal.framework` w 
 - `FrameQueueTests.m`: 60 000 operacji porównanych z niezmienioną metodą kolejki VoidLink, cache formatu, oczekiwanie i ograniczenie fizycznej pojemności.
 - `FramePresenterTests.m`: FIFO/prefill, output PTS, callback na main, brak własnego timebase, oczekiwanie, odrzucanie wyników starej sesji, żywy CADisplayLink, własność klatek oraz wyłączność warstw po zmianie Standard → Metal → Standard.
 - Ten sam test wymusza zatrzymanie pierwszej pracy Metal i serię trzech kolejnych klatek. Przy zablokowanym głównym wątku worker zachowuje FIFO, nie potrzebuje ticków ekranu, rozróżnia sukces/busy/błąd i wraca po pauzie.
+- Nowe kontrole sprawdzają ten sam żyjący NSThread po opróżnieniu FIFO, pobranie pojedynczej klatki bez prefill mimo progu 3, anulowanie pustego oczekiwania, dostarczenie wyników dekodowania przed zakończeniem drain oraz odrzucanie statystyk starej sesji.
 - `test_native_render_sdl.c`: produkcyjne funkcje routingu nie wywołują żadnej dodatkowej operacji SDL GPU w trybie natywnym; pozostałe tryby przekazują argumenty i błędy, również dla obrotu.
 - Pozostają testy dotyku, Drawing Toolkit, Androida i porównanie bibliotek/zasobów IPA z v4.6.0.
 

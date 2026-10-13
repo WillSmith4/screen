@@ -93,6 +93,23 @@ int main(void) {
         assert(CACurrentMediaTime() - start >= 0.009);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ [queue stop]; });
         assert(![queue dequeueWithTimeout:0.5]);
+        // Metal sleeps until one frame arrives, irrespective of the depth.
+        [queue startWithFramesToBuffer:3];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            [queue enqueue:arrival];
+        });
+        assert([queue waitForEnqueue]);
+        assert(sequence([queue dequeue]) == 123);
+        // Cancellation of an empty persistent consumer must not depend on a
+        // future video packet. Stop wakes it; a restart can accept frames.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ [queue stop]; });
+        assert(![queue waitForEnqueue]);
+        [queue startWithFramesToBuffer:3];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ [queue interruptWaiters]; });
+        assert(![queue waitForEnqueue]);
+        [queue enqueue:arrival];
+        assert([queue waitForEnqueue]);
+        assert(sequence([queue dequeue]) == 123);
         [queue startWithFramesToBuffer:1];
         for (int i = 0; i < 1000; ++i) { [queue enqueue:arrival]; }
         assert(queue.count == 15); // IDR storm stays memory-safe.

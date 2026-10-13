@@ -3,6 +3,13 @@
 #import "ScrcpyVideoDecoder.h"
 #import "ScrcpyMetalRenderer.h"
 #include <assert.h>
+#include <unistd.h>
+#include <math.h>
+
+@interface ScrcpyMetalRenderer (TestTiming)
+- (void)recordPresentedTime:(CFTimeInterval)time generation:(uint64_t)generation;
+- (void)recordGPUTime:(CFTimeInterval)time generation:(uint64_t)generation;
+@end
 
 static _Atomic(int) outputs, recoveries;
 static int expectedWidth, expectedHeight;
@@ -32,6 +39,10 @@ static void testDecode(NSString *directory, NSString *extension, CMVideoCodecTyp
     atomic_store(&recoveries, 0);
     ScrcpyVideoDecoder *decoder = [[ScrcpyVideoDecoder alloc] initWithCodec:codec requireHardware:NO
         output:^(CVPixelBufferRef image, int64_t pts, BOOL keyframe) {
+            assert(!NSThread.isMainThread);
+            assert(strcmp(dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL), "scrcpy.video.decoded-output") == 0);
+            // Keep output alive beyond the VT callback; drain must include it.
+            usleep(1500);
             assert(CVPixelBufferGetWidth(image) == expectedWidth);
             assert(CVPixelBufferGetHeight(image) == expectedHeight);
             assert(CVPixelBufferGetPlaneCount(image) == 2);
@@ -150,5 +161,30 @@ int main(int argc, const char **argv) {
         checkMetalColor(renderer, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, 940,512,512, 255,255,255);
         [renderer drain];
         puts("PASS: real Metal GPU pixels, NV12/full range/P010 SDR, red/white/black, letterbox, buffer lifetime");
+        // Offscreen GPU completion is not an onscreen presentation.
+        assert([renderer takeStatistics].presented == 0);
+        [renderer configureFrameRate:120];
+        uint64_t generation = [[renderer valueForKey:@"statisticsGeneration"] unsignedLongLongValue];
+        CFTimeInterval initialGPUTime = renderer.averageGPUTime;
+        [renderer recordGPUTime:.001 generation:generation];
+        assert(fabs(renderer.averageGPUTime - (.25 * .001 + .75 * initialGPUTime)) < 1e-9);
+        [renderer recordPresentedTime:10 generation:generation];
+        [renderer recordPresentedTime:10 + 1.0 / 120 generation:generation];
+        [renderer recordPresentedTime:0 generation:generation];
+        ScrcpyMetalStatistics stats = [renderer takeStatistics];
+        assert(stats.presented == 2 && stats.unpresentedCallbacks == 1);
+        assert(fabs(stats.maxPresentationGap - 1.0 / 120) < 1e-9);
+        assert([renderer takeStatistics].presented == 0);
+        [renderer configureFrameRate:120];
+        [renderer recordPresentedTime:20 generation:generation];
+        [renderer recordGPUTime:.1 generation:generation];
+        assert([renderer takeStatistics].presented == 0);
+        assert(fabs(renderer.averageGPUTime - initialGPUTime) < 1e-9);
+        // Every error path consumes/releases exactly one reserved GPU slot.
+        for (int i = 0; i < 10; ++i) {
+            assert([renderer waitForGPUCapacity]);
+            assert([renderer renderAcquiredPixelBuffer:NULL minimumDuration:1.0/120] == ScrcpyMetalUnsupported);
+        }
+        puts("PASS: Metal presentation counts, dropped/old callbacks, GPU-time EMA and reserved-slot error ownership");
     }
 }

@@ -3,6 +3,11 @@
 #import <simd/simd.h>
 #import <stdatomic.h>
 #import <TargetConditionals.h>
+#import <os/lock.h>
+#include <math.h>
+
+// Metal pacing adapted from VoidLink (2d9558e1), Acaki / TrueZhuanjia.
+// GPL-3.0; see docs/licenses/VoidLink-GPL-3.0.txt.
 
 // Native bi-planar YUV -> RGB on the GPU. Textures reference the decoder's
 // IOSurface. Per-frame constants use Metal's inline storage, not shared buffers
@@ -32,10 +37,16 @@ static NSString * const shaderSource = @
     _Atomic(bool) _failed;
     CGColorSpaceRef _srgb, _rec709;
     BOOL _lastRec601;
+    os_unfair_lock _statisticsLock;
+    ScrcpyMetalStatistics _statistics;
+    CFTimeInterval _lastPresented;
+    uint64_t _statisticsGeneration;
 }
 
 - (instancetype)init {
     if (!(self = [super init])) { return nil; }
+    _statisticsLock = OS_UNFAIR_LOCK_INIT;
+    [self configureFrameRate:60];
     _device = MTLCreateSystemDefaultDevice();
     if (!_device) { return nil; }
     NSError *error = nil;
@@ -67,6 +78,54 @@ static NSString * const shaderSource = @
 
 - (CAMetalLayer *)layer { return _layer; }
 
+- (void)configureFrameRate:(int)fps {
+    os_unfair_lock_lock(&_statisticsLock);
+    ++_statisticsGeneration;
+    _statistics = (ScrcpyMetalStatistics){ .averageGPUTime = 0.5 / MAX(1, fps) };
+    _lastPresented = 0;
+    os_unfair_lock_unlock(&_statisticsLock);
+}
+- (CFTimeInterval)averageGPUTime {
+    os_unfair_lock_lock(&_statisticsLock);
+    CFTimeInterval time = _statistics.averageGPUTime;
+    os_unfair_lock_unlock(&_statisticsLock);
+    return time;
+}
+- (ScrcpyMetalStatistics)takeStatistics {
+    os_unfair_lock_lock(&_statisticsLock);
+    ScrcpyMetalStatistics result = _statistics;
+    _statistics.presented = _statistics.unpresentedCallbacks = 0;
+    _statistics.maxPresentationGap = 0;
+    os_unfair_lock_unlock(&_statisticsLock);
+    return result;
+}
+- (void)recordPresentedTime:(CFTimeInterval)time generation:(uint64_t)generation {
+    os_unfair_lock_lock(&_statisticsLock);
+    if (generation == _statisticsGeneration) {
+        if (time > 0 && isfinite(time)) {
+            ++_statistics.presented;
+            if (_lastPresented > 0 && time > _lastPresented) {
+                _statistics.maxPresentationGap = MAX(_statistics.maxPresentationGap, time - _lastPresented);
+            }
+            _lastPresented = MAX(_lastPresented, time);
+        } else {
+            ++_statistics.unpresentedCallbacks;
+        }
+    }
+    os_unfair_lock_unlock(&_statisticsLock);
+}
+- (void)recordGPUTime:(CFTimeInterval)time generation:(uint64_t)generation {
+    os_unfair_lock_lock(&_statisticsLock);
+    if (generation == _statisticsGeneration && time > 0 && isfinite(time)) {
+        _statistics.averageGPUTime = .25 * time + .75 * _statistics.averageGPUTime;
+    }
+    os_unfair_lock_unlock(&_statisticsLock);
+}
+- (BOOL)waitForGPUCapacity {
+    return dispatch_semaphore_wait(_slots, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) == 0;
+}
+- (void)releaseGPUCapacity { dispatch_semaphore_signal(_slots); }
+
 - (void)drain {
     dispatch_group_wait(_inFlight, DISPATCH_TIME_FOREVER);
     CVMetalTextureCacheFlush(_cache, 0);
@@ -83,15 +142,21 @@ static NSString * const shaderSource = @
 }
 
 - (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
+    if (![self waitForGPUCapacity]) { return ScrcpyMetalBusy; }
+    return [self renderAcquiredPixelBuffer:buffer minimumDuration:duration];
+}
+
+- (ScrcpyMetalResult)renderAcquiredPixelBuffer:(CVPixelBufferRef)buffer minimumDuration:(CFTimeInterval)duration {
     return [self renderPixelBuffer:buffer toTexture:nil minimumDuration:duration];
 }
 
 - (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture {
+    if (![self waitForGPUCapacity]) { return ScrcpyMetalBusy; }
     return [self renderPixelBuffer:buffer toTexture:texture minimumDuration:0];
 }
 
 - (ScrcpyMetalResult)renderPixelBuffer:(CVPixelBufferRef)buffer toTexture:(id<MTLTexture>)texture minimumDuration:(CFTimeInterval)duration {
-    if (atomic_load(&_failed)) { return ScrcpyMetalUnsupported; }
+    if (!buffer || atomic_load(&_failed)) { [self releaseGPUCapacity]; return ScrcpyMetalUnsupported; }
     OSType format = CVPixelBufferGetPixelFormatType(buffer);
     BOOL ten = format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
             || format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
@@ -99,11 +164,9 @@ static NSString * const shaderSource = @
              || format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
     if ((!ten && format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
               && format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-            || CVPixelBufferGetPlaneCount(buffer) != 2) { return NO; }
-    // Like VoidLink, wait for GPU capacity on the render worker instead of
-    // discarding a decoded frame just because the previous GPU job is busy.
-    if (dispatch_semaphore_wait(_slots, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC))) {
-        return ScrcpyMetalBusy;
+            || CVPixelBufferGetPlaneCount(buffer) != 2) {
+        [self releaseGPUCapacity];
+        return ScrcpyMetalUnsupported;
     }
     CVMetalTextureRef luma = NULL, chroma = NULL;
     CVReturn status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, _cache, buffer,
@@ -165,14 +228,21 @@ static NSString * const shaderSource = @
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [encoder endEncoding];
     CVPixelBufferRetain(buffer);
+    os_unfair_lock_lock(&_statisticsLock);
+    uint64_t generation = _statisticsGeneration;
+    os_unfair_lock_unlock(&_statisticsLock);
     dispatch_group_enter(_inFlight);
     [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         if (completed.status == MTLCommandBufferStatusError) {
             atomic_store(&self->_failed, true);
             NSLog(@"[MetalVideo] GPU error: %@", completed.error);
         }
+        if (completed.GPUStartTime > 0) {
+            [self recordGPUTime:completed.GPUEndTime - completed.GPUStartTime generation:generation];
+        }
         CFRelease(luma); CFRelease(chroma);
         CVPixelBufferRelease(buffer);
+        CVMetalTextureCacheFlush(self->_cache, 0);
         dispatch_semaphore_signal(self->_slots);
         dispatch_group_leave(self->_inFlight);
     }];
@@ -180,9 +250,13 @@ static NSString * const shaderSource = @
     // of CADisplayLink. Minimum duration prevents burst submissions replacing
     // one another within a refresh. The simulator lacks device display timing.
     if (drawable) {
-#if TARGET_OS_SIMULATOR
+#if TARGET_OS_SIMULATOR || TARGET_OS_OSX
         [command presentDrawable:drawable];
 #else
+        // A successful command submission does not establish onscreen FPS.
+        [drawable addPresentedHandler:^(id<MTLDrawable> displayed) {
+            [self recordPresentedTime:displayed.presentedTime generation:generation];
+        }];
         [command presentDrawable:drawable afterMinimumDuration:duration];
 #endif
     }

@@ -62,9 +62,15 @@
     int _highWaterMark;
     BOOL _droppedLast, _paused;
     uint64_t _generation;
+    dispatch_semaphore_t _arrival;
+    BOOL _waiting;
 }
 - (instancetype)init {
-    if ((self = [super init])) { _lock = OS_UNFAIR_LOCK_INIT; _paused = YES; }
+    if ((self = [super init])) {
+        _lock = OS_UNFAIR_LOCK_INIT;
+        _paused = YES;
+        _arrival = dispatch_semaphore_create(0);
+    }
     return self;
 }
 - (void)clearLocked {
@@ -72,6 +78,33 @@
     _head = _tail = _count = 0;
     _droppedLast = NO;
     ++_generation;
+    [self wakeLocked];
+}
+- (void)wakeLocked {
+    // Coalesce wakeups instead of accumulating a semaphore token per frame.
+    if (_waiting) { _waiting = NO; dispatch_semaphore_signal(_arrival); }
+}
+- (void)interruptWaiters {
+    os_unfair_lock_lock(&_lock);
+    ++_generation;
+    [self wakeLocked];
+    os_unfair_lock_unlock(&_lock);
+}
+- (BOOL)waitForEnqueue {
+    os_unfair_lock_lock(&_lock);
+    uint64_t generation = _generation;
+    for (;;) {
+        if (_paused || generation != _generation || NSThread.currentThread.isCancelled) {
+            os_unfair_lock_unlock(&_lock);
+            return NO;
+        }
+        if (_count) { os_unfair_lock_unlock(&_lock); return YES; }
+        _waiting = YES;
+        os_unfair_lock_unlock(&_lock);
+        dispatch_semaphore_wait(_arrival, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC));
+        os_unfair_lock_lock(&_lock);
+        _waiting = NO;
+    }
 }
 - (void)startWithFramesToBuffer:(int)frames {
     os_unfair_lock_lock(&_lock);
@@ -103,6 +136,7 @@
     _frames[_tail] = frame;
     _tail = (_tail + 1) % 15;
     ++_count;
+    [self wakeLocked];
 }
 - (NSUInteger)enqueue:(ScrcpyQueuedFrame *)frame {
     os_unfair_lock_lock(&_lock);
